@@ -99,7 +99,7 @@ func (c *Channel) Send(ctx context.Context, msg *bus.OutboundMessage) error {
     }
 
     chatID := parseInt64(msg.ChatID)
-    html := markdownToHTML(msg.Content)
+    html := renderMessageHTML(msg.Content)
 
     tgMsg := tgbotapi.NewMessage(chatID, html)
     tgMsg.ParseMode = "HTML"
@@ -126,12 +126,36 @@ func parseInt64(s string) int64 {
     return n
 }
 
+func renderMessageHTML(content string) string {
+    think, main, hasThink := splitThink(content)
+    if hasThink {
+        thinkHTML := markdownToHTML(think)
+        mainHTML := markdownToHTML(main)
+        if mainHTML == "" {
+            return "Thinking:\n" + thinkHTML
+        }
+        return "Thinking:\n" + thinkHTML + "\n\n" + mainHTML
+    }
+    return markdownToHTML(content)
+}
+
+func splitThink(content string) (string, string, bool) {
+    re := regexp.MustCompile(`(?s)<think>(.*?)</think>`)
+    matches := re.FindStringSubmatch(content)
+    if len(matches) > 1 {
+        think := strings.TrimSpace(matches[1])
+        main := strings.TrimSpace(re.ReplaceAllString(content, ""))
+        return think, main, true
+    }
+    return "", content, false
+}
+
 func markdownToHTML(text string) string {
-    text = regexp.MustCompile(`\*\*(.+?)\*\*`).ReplaceAllString(text, "<b>$1</b>")
-    text = regexp.MustCompile(`__(.+?)__`).ReplaceAllString(text, "<b>$1</b>")
-    text = regexp.MustCompile("`([^`]+)`").ReplaceAllString(text, "<code>$1</code>")
     text = strings.ReplaceAll(text, "&", "&amp;")
     text = strings.ReplaceAll(text, "<", "&lt;")
     text = strings.ReplaceAll(text, ">", "&gt;")
+    text = regexp.MustCompile(`\*\*(.+?)\*\*`).ReplaceAllString(text, "<b>$1</b>")
+    text = regexp.MustCompile(`__(.+?)__`).ReplaceAllString(text, "<b>$1</b>")
+    text = regexp.MustCompile("`([^`]+)`").ReplaceAllString(text, "<code>$1</code>")
     return text
 }

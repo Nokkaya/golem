@@ -69,7 +69,11 @@ func (e *execToolImpl) execute(ctx context.Context, input *ExecInput) (*ExecOutp
     timeoutCtx, cancel := context.WithTimeout(ctx, e.timeout)
     defer cancel()
     cmd = exec.CommandContext(timeoutCtx, cmd.Path, cmd.Args[1:]...)
-    cmd.Dir = input.WorkingDir
+    if input.WorkingDir != "" {
+        cmd.Dir = input.WorkingDir
+    } else if e.workspaceDir != "" {
+        cmd.Dir = e.workspaceDir
+    }
 
     var stdout, stderr strings.Builder
     cmd.Stdout = &stdout
