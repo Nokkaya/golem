@@ -3,6 +3,8 @@ package commands
 import (
 	"context"
 	"fmt"
+	"io"
+	"log/slog"
 	"regexp"
 	"strings"
 
@@ -13,6 +15,7 @@ import (
 	"github.com/charmbracelet/bubbles/textarea"
 	"github.com/charmbracelet/bubbles/viewport"
 	tea "github.com/charmbracelet/bubbletea"
+	"github.com/charmbracelet/glamour"
 	"github.com/charmbracelet/lipgloss"
 	"github.com/spf13/cobra"
 )
@@ -35,6 +38,9 @@ type model struct {
 	senderStyle   lipgloss.Style
 	aiStyle       lipgloss.Style
 	thinkingStyle lipgloss.Style
+	toolStyle     lipgloss.Style
+	renderer      *glamour.TermRenderer
+	history       *strings.Builder
 	err           error
 	loop          *agent.Loop
 	ctx           context.Context
@@ -56,10 +62,18 @@ func initialModel(ctx context.Context, loop *agent.Loop) model {
 	ta.ShowLineNumbers = false
 
 	vp := viewport.New(30, 5)
-	vp.SetContent(`Welcome to Golem Chat!
+
+	history := &strings.Builder{}
+	history.WriteString(`Welcome to Golem Chat!
 Type a message and press Enter to send.`)
+	vp.SetContent(history.String())
 
 	ta.KeyMap.InsertNewline.SetEnabled(false)
+
+	renderer, _ := glamour.NewTermRenderer(
+		glamour.WithStandardStyle("dark"),
+		glamour.WithWordWrap(30),
+	)
 
 	return model{
 		textarea:      ta,
@@ -67,6 +81,9 @@ Type a message and press Enter to send.`)
 		senderStyle:   lipgloss.NewStyle().Foreground(lipgloss.Color("5")),
 		aiStyle:       lipgloss.NewStyle().Foreground(lipgloss.Color("2")),
 		thinkingStyle: lipgloss.NewStyle().Foreground(lipgloss.Color("245")).Italic(true),
+		toolStyle:     lipgloss.NewStyle().Foreground(lipgloss.Color("240")),
+		renderer:      renderer,
+		history:       history,
 		loop:          loop,
 		ctx:           ctx,
 		err:           nil,
@@ -78,6 +95,17 @@ func (m model) Init() tea.Cmd {
 }
 
 type responseMsg string
+
+type toolStartMsg struct {
+	name string
+	args string
+}
+
+type toolFinishMsg struct {
+	name   string
+	result string
+	err    error
+}
 
 func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	var (
@@ -92,8 +120,17 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case tea.WindowSizeMsg:
 		m.viewport.Width = msg.Width
 		m.textarea.SetWidth(msg.Width)
-		m.viewport.Height = msg.Height - m.textarea.Height() - 2 // Adjust for padding/border
+		// Height - textarea height - 1 line for separation
+		m.viewport.Height = msg.Height - m.textarea.Height() - 1
 		m.textarea.SetWidth(msg.Width)
+
+		// Update renderer width
+		if m.renderer != nil {
+			m.renderer, _ = glamour.NewTermRenderer(
+				glamour.WithStandardStyle("dark"),
+				glamour.WithWordWrap(msg.Width),
+			)
+		}
 
 	case tea.KeyMsg:
 		switch msg.Type {
@@ -106,7 +143,8 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			input := m.textarea.Value()
 			m.textarea.Reset()
 
-			m.viewport.SetContent(m.viewport.View() + "\n\n" + m.senderStyle.Render("You: ") + input)
+			m.history.WriteString("\n\n" + m.senderStyle.Render("You: ") + input)
+			m.viewport.SetContent(m.history.String())
 			m.viewport.GotoBottom()
 
 			return m, func() tea.Msg {
@@ -134,10 +172,40 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			viewContent = "\n\n" + m.thinkingStyle.Render("💭 Thinking:\n  "+thinkContent) +
 				"\n\n" + m.aiStyle.Render("Golem: ") + mainContent
 		} else {
-			viewContent = "\n\n" + m.aiStyle.Render("Golem: ") + content
+			mainContent := content
+			rendered, err := m.renderer.Render(mainContent)
+			if err == nil {
+				mainContent = rendered
+			} else {
+				mainContent += fmt.Sprintf("\n(Markdown render error: %v)", err)
+			}
+			viewContent = "\n\n" + m.aiStyle.Render("Golem: ") + mainContent
 		}
 
-		m.viewport.SetContent(m.viewport.View() + viewContent)
+		m.history.WriteString(viewContent)
+		m.viewport.SetContent(m.history.String())
+		m.viewport.GotoBottom()
+
+	case toolStartMsg:
+		content := fmt.Sprintf("🛠️  Executing tool: %s\n", msg.name)
+		m.history.WriteString("\n" + m.toolStyle.Render(content))
+		m.viewport.SetContent(m.history.String())
+		m.viewport.GotoBottom()
+
+	case toolFinishMsg:
+		var content string
+		if msg.err != nil {
+			content = fmt.Sprintf("❌ Tool failed: %v", msg.err)
+		} else {
+			// Truncate result if too long
+			result := msg.result
+			if len(result) > 100 {
+				result = result[:100] + "..."
+			}
+			content = fmt.Sprintf("✅ Tool finished: %s", result)
+		}
+		m.history.WriteString("\n" + m.toolStyle.Render(content))
+		m.viewport.SetContent(m.history.String())
 		m.viewport.GotoBottom()
 
 	case errMsg:
@@ -150,10 +218,10 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 func (m model) View() string {
 	return fmt.Sprintf(
-		"%s\n\n%s",
+		"%s\n%s",
 		m.viewport.View(),
 		m.textarea.View(),
-	) + "\n\n"
+	)
 }
 
 func runChat(cmd *cobra.Command, args []string) error {
@@ -162,6 +230,9 @@ func runChat(cmd *cobra.Command, args []string) error {
 	if err != nil {
 		return fmt.Errorf("failed to load config: %w", err)
 	}
+
+	// Disable logging for TUI
+	slog.SetDefault(slog.New(slog.NewTextHandler(io.Discard, nil)))
 
 	modelProvider, err := provider.NewChatModel(ctx, cfg)
 	if err != nil {
@@ -188,7 +259,15 @@ func runChat(cmd *cobra.Command, args []string) error {
 		return nil
 	}
 
-	p := tea.NewProgram(initialModel(ctx, loop))
+	p := tea.NewProgram(initialModel(ctx, loop), tea.WithAltScreen())
+
+	// Set callbacks
+	loop.OnToolStart = func(name, args string) {
+		p.Send(toolStartMsg{name: name, args: args})
+	}
+	loop.OnToolFinish = func(name, result string, err error) {
+		p.Send(toolFinishMsg{name: name, result: result, err: err})
+	}
 
 	if _, err := p.Run(); err != nil {
 		return err
