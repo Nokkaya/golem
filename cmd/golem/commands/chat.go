@@ -29,6 +29,40 @@ type (
 	errMsg error
 )
 
+type markdownRenderer interface {
+	Render(string) (string, error)
+}
+
+func renderMarkdown(r markdownRenderer, input string) string {
+	if r == nil {
+		return input
+	}
+	rendered, err := r.Render(input)
+	if err != nil {
+		return input + fmt.Sprintf("\n(Markdown render error: %v)", err)
+	}
+	return rendered
+}
+
+func splitThink(content string) (string, string, bool) {
+	re := regexp.MustCompile(`(?s)<think>(.*?)</think>`)
+	matches := re.FindStringSubmatch(content)
+	if len(matches) > 1 {
+		think := strings.TrimSpace(matches[1])
+		main := strings.TrimSpace(re.ReplaceAllString(content, ""))
+		return think, main, true
+	}
+	return "", content, false
+}
+
+func renderResponseParts(content string, r markdownRenderer) (string, string, bool) {
+	think, main, hasThink := splitThink(content)
+	if hasThink {
+		return renderMarkdown(r, think), renderMarkdown(r, main), true
+	}
+	return "", renderMarkdown(r, main), false
+}
+
 type model struct {
 	viewport      viewport.Model
 	textarea      textarea.Model
