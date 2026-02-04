@@ -12,6 +12,7 @@ import (
 	"github.com/MEKXH/golem/internal/bus"
 	"github.com/MEKXH/golem/internal/config"
 	"github.com/MEKXH/golem/internal/provider"
+	"github.com/charmbracelet/bubbles/spinner"
 	"github.com/charmbracelet/bubbles/textarea"
 	"github.com/charmbracelet/bubbles/viewport"
 	tea "github.com/charmbracelet/bubbletea"
@@ -77,6 +78,8 @@ func indentLines(s, prefix string) string {
 type model struct {
 	viewport      viewport.Model
 	textarea      textarea.Model
+	spinner       spinner.Model
+	loading       bool
 	senderStyle   lipgloss.Style
 	aiStyle       lipgloss.Style
 	thinkingStyle lipgloss.Style
@@ -120,9 +123,15 @@ Type a message and press Enter to send.`)
 
 	ta.KeyMap.InsertNewline.SetEnabled(false)
 
+	s := spinner.New()
+	s.Spinner = spinner.Dot
+	s.Style = lipgloss.NewStyle().Foreground(lipgloss.Color("205"))
+
 	return model{
 		textarea:      ta,
 		viewport:      vp,
+		spinner:       s,
+		loading:       false,
 		senderStyle:   lipgloss.NewStyle().Foreground(lipgloss.Color("5")),
 		aiStyle:       lipgloss.NewStyle().Foreground(lipgloss.Color("2")),
 		thinkingStyle: lipgloss.NewStyle().Foreground(lipgloss.Color("245")).Italic(true),
@@ -165,8 +174,8 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case tea.WindowSizeMsg:
 		m.viewport.Width = msg.Width
 		m.textarea.SetWidth(msg.Width)
-		// Height - textarea height - 1 line for separation
-		m.viewport.Height = msg.Height - m.textarea.Height() - 1
+		// Height - textarea height - 1 line for separation - 1 line for spinner
+		m.viewport.Height = msg.Height - m.textarea.Height() - 2
 		m.textarea.SetWidth(msg.Width)
 
 		// Update renderer width
@@ -178,6 +187,13 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			if err == nil {
 				m.renderer = newRenderer
 			}
+		}
+
+	case spinner.TickMsg:
+		if m.loading {
+			var cmd tea.Cmd
+			m.spinner, cmd = m.spinner.Update(msg)
+			return m, cmd
 		}
 
 	case tea.KeyMsg:
@@ -195,16 +211,21 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.viewport.SetContent(m.history.String())
 			m.viewport.GotoBottom()
 
-			return m, func() tea.Msg {
-				resp, err := m.loop.ProcessDirect(m.ctx, input)
-				if err != nil {
-					return errMsg(err)
-				}
-				return responseMsg(resp)
-			}
+			m.loading = true
+			return m, tea.Batch(
+				m.spinner.Tick,
+				func() tea.Msg {
+					resp, err := m.loop.ProcessDirect(m.ctx, input)
+					if err != nil {
+						return errMsg(err)
+					}
+					return responseMsg(resp)
+				},
+			)
 		}
 
 	case responseMsg:
+		m.loading = false
 		content := string(msg)
 		var viewContent string
 		thinkRendered, mainRendered, hasThink := renderResponseParts(content, m.renderer)
@@ -243,6 +264,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.viewport.GotoBottom()
 
 	case errMsg:
+		m.loading = false
 		m.err = msg
 		return m, nil
 	}
@@ -251,9 +273,14 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 }
 
 func (m model) View() string {
+	var spinnerView string
+	if m.loading {
+		spinnerView = m.spinner.View() + " Thinking..."
+	}
 	return fmt.Sprintf(
-		"%s\n%s",
+		"%s\n%s\n%s",
 		m.viewport.View(),
+		spinnerView,
 		m.textarea.View(),
 	)
 }
