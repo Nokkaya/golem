@@ -2,6 +2,10 @@ package tools
 
 import (
     "context"
+    "fmt"
+    "os"
+    "path/filepath"
+    "strings"
     "testing"
 
     "github.com/cloudwego/eino/schema"
@@ -35,5 +39,28 @@ func TestRegistry_RegisterAndGet(t *testing.T) {
     }
     if tool == nil {
         t.Fatal("tool is nil")
+    }
+}
+
+func TestReadFileTool(t *testing.T) {
+    tmpDir := t.TempDir()
+    testFile := filepath.Join(tmpDir, "test.txt")
+    os.WriteFile(testFile, []byte("line1\nline2\nline3"), 0644)
+
+    tool, err := NewReadFileTool()
+    if err != nil {
+        t.Fatalf("NewReadFileTool error: %v", err)
+    }
+
+    ctx := context.Background()
+    argsJSON := fmt.Sprintf(`{"path": %q}`, testFile)
+
+    result, err := tool.InvokableRun(ctx, argsJSON)
+    if err != nil {
+        t.Fatalf("InvokableRun error: %v", err)
+    }
+
+    if !strings.Contains(result, "line1") {
+        t.Errorf("expected result to contain 'line1', got: %s", result)
     }
 }
