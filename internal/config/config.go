@@ -1,9 +1,12 @@
 package config
 
 import (
+    "encoding/json"
     "os"
     "path/filepath"
     "strings"
+
+    "github.com/spf13/viper"
 )
 
 // Config root configuration
@@ -137,6 +140,51 @@ func ConfigDir() string {
 // ConfigPath returns the config file path
 func ConfigPath() string {
     return filepath.Join(ConfigDir(), "config.json")
+}
+
+// Load loads config from file or returns defaults
+func Load() (*Config, error) {
+    cfg := DefaultConfig()
+
+    configPath := ConfigPath()
+    if _, err := os.Stat(configPath); os.IsNotExist(err) {
+        if err := Save(cfg); err != nil {
+            return cfg, nil
+        }
+        return cfg, nil
+    }
+
+    v := viper.New()
+    v.SetConfigFile(configPath)
+    v.SetConfigType("json")
+    v.SetEnvPrefix("GOLEM")
+    v.AutomaticEnv()
+
+    if err := v.ReadInConfig(); err != nil {
+        return cfg, err
+    }
+
+    if err := v.Unmarshal(cfg); err != nil {
+        return cfg, err
+    }
+
+    return cfg, nil
+}
+
+// Save saves config to file
+func Save(cfg *Config) error {
+    configPath := ConfigPath()
+
+    if err := os.MkdirAll(filepath.Dir(configPath), 0755); err != nil {
+        return err
+    }
+
+    data, err := json.MarshalIndent(cfg, "", "  ")
+    if err != nil {
+        return err
+    }
+
+    return os.WriteFile(configPath, data, 0644)
 }
 
 // WorkspacePath returns the expanded workspace path
