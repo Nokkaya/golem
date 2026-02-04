@@ -1,7 +1,13 @@
 package main
 
-import "fmt"
+import (
+    "os"
+
+    "github.com/MEKXH/golem/cmd/golem/commands"
+)
 
 func main() {
-    fmt.Println("Golem v0.1.0")
+    if err := commands.NewRootCmd().Execute(); err != nil {
+        os.Exit(1)
+    }
 }
