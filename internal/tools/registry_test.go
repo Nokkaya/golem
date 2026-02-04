@@ -64,3 +64,22 @@ func TestReadFileTool(t *testing.T) {
         t.Errorf("expected result to contain 'line1', got: %s", result)
     }
 }
+
+func TestExecTool(t *testing.T) {
+    tool, err := NewExecTool(60, false, "")
+    if err != nil {
+        t.Fatalf("NewExecTool error: %v", err)
+    }
+
+    ctx := context.Background()
+    argsJSON := `{"command": "echo hello"}`
+
+    result, err := tool.InvokableRun(ctx, argsJSON)
+    if err != nil {
+        t.Fatalf("InvokableRun error: %v", err)
+    }
+
+    if !strings.Contains(result, "hello") {
+        t.Errorf("expected result to contain 'hello', got: %s", result)
+    }
+}
