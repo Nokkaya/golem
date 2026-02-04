@@ -33,6 +33,28 @@ golem run
 
 Config file: `~/.golem/config.json`
 
+### Workspace
+
+Controls where sessions, context, and the exec tool operate.
+
+`agents.defaults.workspace_mode`:
+- `default` (default): always use `~/.golem/workspace`
+- `cwd`: use the current working directory when launching golem
+- `path`: use the explicit `agents.defaults.workspace` value (required)
+
+Example:
+
+```json
+{
+  "agents": {
+    "defaults": {
+      "workspace_mode": "path",
+      "workspace": "D:/Work/my-project"
+    }
+  }
+}
+```
+
 ### Providers
 
 Supports: OpenRouter, Claude, OpenAI, DeepSeek, Gemini, Ollama, and more.

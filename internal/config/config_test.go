@@ -69,3 +69,39 @@ func TestLoadConfig_PascalCaseKeys(t *testing.T) {
         t.Fatalf("expected BaseURL loaded, got %q", cfg.Providers.OpenRouter.BaseURL)
     }
 }
+
+func TestWorkspacePath_Default(t *testing.T) {
+    cfg := DefaultConfig()
+    cfg.Agents.Defaults.Workspace = ""
+    cfg.Agents.Defaults.WorkspaceMode = "default"
+    got := cfg.WorkspacePath()
+    want := filepath.Join(ConfigDir(), "workspace")
+    if got != want {
+        t.Fatalf("got %s want %s", got, want)
+    }
+}
+
+func TestWorkspacePath_PathModeRequiresWorkspace(t *testing.T) {
+    cfg := DefaultConfig()
+    cfg.Agents.Defaults.WorkspaceMode = "path"
+    cfg.Agents.Defaults.Workspace = ""
+    if _, err := cfg.WorkspacePathChecked(); err == nil {
+        t.Fatal("expected error")
+    }
+}
+
+func TestWorkspacePath_CwdModeUsesCwd(t *testing.T) {
+    cfg := DefaultConfig()
+    cfg.Agents.Defaults.WorkspaceMode = "cwd"
+    got, err := cfg.WorkspacePathChecked()
+    if err != nil {
+        t.Fatalf("err: %v", err)
+    }
+    wd, err := os.Getwd()
+    if err != nil {
+        t.Fatalf("Getwd: %v", err)
+    }
+    if got != wd {
+        t.Fatalf("got %s want %s", got, wd)
+    }
+}

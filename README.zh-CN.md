@@ -33,6 +33,28 @@ golem run
 
 配置文件：`~/.golem/config.json`
 
+### 工作区
+
+用于控制会话、上下文与 exec 工具的默认工作目录。
+
+`agents.defaults.workspace_mode`：
+- `default`（默认）：始终使用 `~/.golem/workspace`
+- `cwd`：使用启动 golem 时的当前终端目录
+- `path`：使用 `agents.defaults.workspace` 指定的路径（必填）
+
+示例：
+
+```json
+{
+  "agents": {
+    "defaults": {
+      "workspace_mode": "path",
+      "workspace": "D:/Work/my-project"
+    }
+  }
+}
+```
+
 ### 模型提供商
 
 支持：OpenRouter、Claude、OpenAI、DeepSeek、Gemini、Ollama 等。
