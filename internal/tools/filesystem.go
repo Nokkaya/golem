@@ -3,6 +3,7 @@ package tools
 import (
 	"context"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"strings"
@@ -62,29 +63,99 @@ func NewReadFileTool(workspacePath string) (tool.InvokableTool, error) {
 			return nil, err
 		}
 
-		data, err := os.ReadFile(path)
+		file, err := os.Open(path)
 		if err != nil {
 			return nil, err
 		}
+		defer file.Close()
 
-		content := string(data)
-		lines := strings.Split(content, "\n")
-		totalLines := len(lines)
+		// buffer for reading
+		buf := make([]byte, 32*1024)
 
-		if input.Offset > 0 {
-			if input.Offset >= len(lines) {
-				lines = []string{}
-			} else {
-				lines = lines[input.Offset:]
+		var totalLines int = 0
+		var currentNewlineCount int = 0
+
+		var startOffset int64 = -1
+		var endOffset int64 = -1
+
+		// If Offset is 0, startOffset is 0.
+		if input.Offset == 0 {
+			startOffset = 0
+		}
+
+		var currentPos int64 = 0
+
+		for {
+			n, err := file.Read(buf)
+			if n > 0 {
+				chunk := buf[:n]
+
+				// Count newlines in this chunk
+				for i, b := range chunk {
+					if b == '\n' {
+						currentNewlineCount++
+						// Found a newline.
+						// If this is the Offset-th newline, start reading from next byte.
+						if input.Offset > 0 && currentNewlineCount == input.Offset {
+							startOffset = currentPos + int64(i) + 1
+						}
+
+						// If this is the (Offset + Limit)-th newline, stop reading (endOffset).
+						if input.Limit > 0 && currentNewlineCount == (input.Offset + input.Limit) {
+							endOffset = currentPos + int64(i)
+						}
+					}
+				}
+				currentPos += int64(n)
+			}
+
+			if err != nil {
+				if err == io.EOF {
+					break
+				}
+				return nil, err
 			}
 		}
 
-		if input.Limit > 0 && input.Limit < len(lines) {
-			lines = lines[:input.Limit]
+		// Calculate TotalLines
+		// Mimic strings.Split behavior:
+		// "a\n" -> 2 lines. "a" -> 1 line. "" -> 1 line.
+		totalLines = currentNewlineCount + 1
+
+		// Determine offsets
+		if startOffset == -1 {
+			// Requested offset is beyond file
+			startOffset = currentPos // EOF
+		}
+
+		if endOffset == -1 {
+			// Limit not reached or Limit=0
+			endOffset = currentPos
+		}
+
+		// Read content
+		if startOffset >= endOffset {
+			return &ReadFileOutput{
+				Content:    "",
+				TotalLines: totalLines,
+			}, nil
+		}
+
+		contentSize := endOffset - startOffset
+		// Protection against negative size if logic fails (shouldn't happen)
+		if contentSize < 0 {
+			contentSize = 0
+		}
+
+		contentBuf := make([]byte, contentSize)
+
+		_, err = file.ReadAt(contentBuf, startOffset)
+		if err != nil && err != io.EOF {
+			return nil, err
 		}
 
 		return &ReadFileOutput{
-			Content:    strings.Join(lines, "\n"),
+			Content:    string(contentBuf),
 			TotalLines: totalLines,
 		}, nil
 	}
