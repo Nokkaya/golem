@@ -53,27 +53,38 @@ func (e *execToolImpl) execute(ctx context.Context, input *ExecInput) (*ExecOutp
         }
     }
 
-    var cmd *exec.Cmd
-    if runtime.GOOS == "windows" {
-        cmd = exec.CommandContext(ctx, "cmd", "/C", input.Command)
+    var workingDir string
+    if e.restrictToWorkspace && e.workspaceDir != "" {
+        if input.WorkingDir != "" {
+            safePath, err := validatePath(e.workspaceDir, input.WorkingDir)
+            if err != nil {
+                return &ExecOutput{
+                    Stderr:   fmt.Sprintf("Access denied: %v", err),
+                    ExitCode: 1,
+                }, nil
+            }
+            workingDir = safePath
+        } else {
+            workingDir = e.workspaceDir
+        }
     } else {
-        cmd = exec.CommandContext(ctx, "sh", "-c", input.Command)
-    }
-
-    if input.WorkingDir != "" {
-        cmd.Dir = input.WorkingDir
-    } else if e.workspaceDir != "" {
-        cmd.Dir = e.workspaceDir
+        if input.WorkingDir != "" {
+            workingDir = input.WorkingDir
+        } else if e.workspaceDir != "" {
+            workingDir = e.workspaceDir
+        }
     }
 
     timeoutCtx, cancel := context.WithTimeout(ctx, e.timeout)
     defer cancel()
-    cmd = exec.CommandContext(timeoutCtx, cmd.Path, cmd.Args[1:]...)
-    if input.WorkingDir != "" {
-        cmd.Dir = input.WorkingDir
-    } else if e.workspaceDir != "" {
-        cmd.Dir = e.workspaceDir
+
+    var cmd *exec.Cmd
+    if runtime.GOOS == "windows" {
+        cmd = exec.CommandContext(timeoutCtx, "cmd", "/C", input.Command)
+    } else {
+        cmd = exec.CommandContext(timeoutCtx, "sh", "-c", input.Command)
     }
+    cmd.Dir = workingDir
 
     var stdout, stderr strings.Builder
     cmd.Stdout = &stdout
