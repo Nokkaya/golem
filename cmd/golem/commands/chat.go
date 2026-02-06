@@ -84,6 +84,7 @@ type model struct {
 	aiStyle       lipgloss.Style
 	thinkingStyle lipgloss.Style
 	toolStyle     lipgloss.Style
+	helpStyle     lipgloss.Style
 	renderer      markdownRenderer
 	history       *strings.Builder
 	err           error
@@ -136,6 +137,7 @@ Type a message and press Enter to send.`)
 		aiStyle:       lipgloss.NewStyle().Foreground(lipgloss.Color("2")),
 		thinkingStyle: lipgloss.NewStyle().Foreground(lipgloss.Color("245")).Italic(true),
 		toolStyle:     lipgloss.NewStyle().Foreground(lipgloss.Color("240")),
+		helpStyle:     lipgloss.NewStyle().Foreground(lipgloss.Color("245")),
 		renderer:      renderer,
 		history:       history,
 		loop:          loop,
@@ -174,8 +176,8 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case tea.WindowSizeMsg:
 		m.viewport.Width = msg.Width
 		m.textarea.SetWidth(msg.Width)
-		// Height - textarea height - 1 line for separation - 1 line for spinner
-		m.viewport.Height = msg.Height - m.textarea.Height() - 2
+		// Height - textarea height - 1 line for separation - 1 line for spinner - 1 line for help
+		m.viewport.Height = msg.Height - m.textarea.Height() - 3
 		m.textarea.SetWidth(msg.Width)
 
 		// Update renderer width
@@ -277,11 +279,13 @@ func (m model) View() string {
 	if m.loading {
 		spinnerView = m.spinner.View() + " Thinking..."
 	}
+	helpView := m.helpStyle.Render("  Esc: quit • Enter: send")
 	return fmt.Sprintf(
-		"%s\n%s\n%s",
+		"%s\n%s\n%s\n%s",
 		m.viewport.View(),
 		spinnerView,
 		m.textarea.View(),
+		helpView,
 	)
 }
 
