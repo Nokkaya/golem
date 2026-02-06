@@ -194,3 +194,41 @@ func TestReadFileEdgeCases(t *testing.T) {
 		})
 	}
 }
+
+func TestPathTraversal_Symlink(t *testing.T) {
+	tmpDir := t.TempDir()
+
+	outsideFile := filepath.Join(tmpDir, "outside.txt")
+	err := os.WriteFile(outsideFile, []byte("secret content"), 0644)
+	if err != nil {
+		t.Fatalf("failed to create outside file: %v", err)
+	}
+
+	workspaceDir := filepath.Join(tmpDir, "workspace")
+	err = os.Mkdir(workspaceDir, 0755)
+	if err != nil {
+		t.Fatalf("failed to create workspace dir: %v", err)
+	}
+
+    symlinkPath := filepath.Join(workspaceDir, "link_to_outside")
+    err = os.Symlink(outsideFile, symlinkPath)
+    if err != nil {
+        t.Fatalf("failed to create symlink: %v", err)
+    }
+
+	tool, err := NewReadFileTool(workspaceDir)
+	if err != nil {
+		t.Fatalf("NewReadFileTool error: %v", err)
+	}
+
+	ctx := context.Background()
+	argsJSON := `{"path": "link_to_outside"}`
+
+	result, err := tool.InvokableRun(ctx, argsJSON)
+	if err == nil {
+		t.Fatalf("SECURITY FAILURE: Was able to read file outside workspace via symlink! Result: %s", result)
+	}
+	if !strings.Contains(err.Error(), "access denied") {
+		t.Errorf("Expected 'access denied' error, got: %v", err)
+	}
+}
