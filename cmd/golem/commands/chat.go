@@ -84,6 +84,7 @@ type model struct {
 	aiStyle       lipgloss.Style
 	thinkingStyle lipgloss.Style
 	toolStyle     lipgloss.Style
+	errorStyle    lipgloss.Style
 	helpStyle     lipgloss.Style
 	renderer      markdownRenderer
 	history       *strings.Builder
@@ -137,6 +138,7 @@ Type a message and press Enter to send.`)
 		aiStyle:       lipgloss.NewStyle().Foreground(lipgloss.Color("2")),
 		thinkingStyle: lipgloss.NewStyle().Foreground(lipgloss.Color("245")).Italic(true),
 		toolStyle:     lipgloss.NewStyle().Foreground(lipgloss.Color("240")),
+		errorStyle:    lipgloss.NewStyle().Foreground(lipgloss.Color("196")).Bold(true),
 		helpStyle:     lipgloss.NewStyle().Foreground(lipgloss.Color("245")),
 		renderer:      renderer,
 		history:       history,
@@ -268,6 +270,10 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case errMsg:
 		m.loading = false
 		m.err = msg
+		errorView := "\n\n" + m.errorStyle.Render("Error: ") + msg.Error()
+		m.history.WriteString(errorView)
+		m.viewport.SetContent(m.history.String())
+		m.viewport.GotoBottom()
 		return m, nil
 	}
 
@@ -279,7 +285,7 @@ func (m model) View() string {
 	if m.loading {
 		spinnerView = m.spinner.View() + " Thinking..."
 	}
-	helpView := m.helpStyle.Render("  Esc: quit • Enter: send")
+	helpView := m.helpStyle.Render("  Esc: quit • Enter: send • PgUp/Dn: scroll")
 	return fmt.Sprintf(
 		"%s\n%s\n%s\n%s",
 		m.viewport.View(),
