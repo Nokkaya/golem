@@ -21,6 +21,8 @@ import (
 	"github.com/spf13/cobra"
 )
 
+const welcomeMessage = "Welcome to Golem Chat!\nType a message and press Enter to send."
+
 func NewChatCmd() *cobra.Command {
 	return &cobra.Command{
 		Use:   "chat [message]",
@@ -118,8 +120,7 @@ func initialModel(ctx context.Context, loop *agent.Loop) model {
 	vp := viewport.New(30, 5)
 
 	history := &strings.Builder{}
-	history.WriteString(`Welcome to Golem Chat!
-Type a message and press Enter to send.`)
+	history.WriteString(welcomeMessage)
 	vp.SetContent(history.String())
 
 	ta.KeyMap.InsertNewline.SetEnabled(false)
@@ -202,6 +203,12 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		switch msg.Type {
 		case tea.KeyCtrlC, tea.KeyEsc:
 			return m, tea.Quit
+		case tea.KeyCtrlL:
+			m.history.Reset()
+			m.history.WriteString(welcomeMessage)
+			m.viewport.SetContent(m.history.String())
+			m.viewport.GotoTop()
+			return m, nil
 		case tea.KeyEnter:
 			if m.textarea.Value() == "" {
 				return m, nil
@@ -277,9 +284,9 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 func (m model) View() string {
 	var spinnerView string
 	if m.loading {
-		spinnerView = m.spinner.View() + " Thinking..."
+		spinnerView = m.spinner.View() + m.thinkingStyle.Render(" Thinking...")
 	}
-	helpView := m.helpStyle.Render("  Esc: quit • Enter: send")
+	helpView := m.helpStyle.Render("  Esc: quit • Enter: send • Ctrl+L: clear")
 	return fmt.Sprintf(
 		"%s\n%s\n%s\n%s",
 		m.viewport.View(),
