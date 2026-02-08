@@ -117,9 +117,15 @@ func initialModel(ctx context.Context, loop *agent.Loop) model {
 
 	vp := viewport.New(30, 5)
 
+	welcomeStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("205")).Bold(true)
+	infoStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("240"))
+
+	welcomeMsg := welcomeStyle.Render("Welcome to Golem Chat!") + "\n" +
+		infoStyle.Render("Type a message and press Enter to send.") + "\n" +
+		infoStyle.Render("Press Ctrl+L to clear history, Esc to quit.")
+
 	history := &strings.Builder{}
-	history.WriteString(`Welcome to Golem Chat!
-Type a message and press Enter to send.`)
+	history.WriteString(welcomeMsg)
 	vp.SetContent(history.String())
 
 	ta.KeyMap.InsertNewline.SetEnabled(false)
@@ -202,6 +208,10 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		switch msg.Type {
 		case tea.KeyCtrlC, tea.KeyEsc:
 			return m, tea.Quit
+		case tea.KeyCtrlL:
+			m.history.Reset()
+			m.viewport.SetContent("")
+			return m, nil
 		case tea.KeyEnter:
 			if m.textarea.Value() == "" {
 				return m, nil
@@ -279,7 +289,7 @@ func (m model) View() string {
 	if m.loading {
 		spinnerView = m.spinner.View() + " Thinking..."
 	}
-	helpView := m.helpStyle.Render("  Esc: quit • Enter: send")
+	helpView := m.helpStyle.Render("  Esc: quit • Enter: send • Ctrl+L: clear")
 	return fmt.Sprintf(
 		"%s\n%s\n%s\n%s",
 		m.viewport.View(),
