@@ -36,14 +36,51 @@ func validatePath(workspace, target string) (string, error) {
 		return "", fmt.Errorf("failed to resolve workspace path: %w", err)
 	}
 
+	canonicalWorkspace, err := filepath.EvalSymlinks(absWorkspace)
+	if err != nil {
+		// If workspace path doesn't exist, we can't enforce containment strictly.
+		// However, for security, we should probably fail if we can't resolve the workspace path,
+		// unless the workspace directory itself is expected to be created later.
+		// Given this is a security validation, failing secure is better.
+		// But in some setups (e.g. tests), the workspace might not exist yet?
+		// Actually, if workspace doesn't exist, we can't really operate in it.
+		// Let's assume for now that if EvalSymlinks fails because it doesn't exist, we fall back to Abs.
+		if os.IsNotExist(err) {
+			canonicalWorkspace = absWorkspace
+		} else {
+			return "", fmt.Errorf("failed to resolve workspace symlinks: %w", err)
+		}
+	}
+
 	var absTarget string
 	if filepath.IsAbs(target) {
 		absTarget = filepath.Clean(target)
 	} else {
-		absTarget = filepath.Join(absWorkspace, target)
+		absTarget = filepath.Join(canonicalWorkspace, target)
 	}
 
-	rel, err := filepath.Rel(absWorkspace, absTarget)
+	// Resolve symlinks in the target path to ensure it doesn't point outside
+	canonicalTarget, err := filepath.EvalSymlinks(absTarget)
+	if err != nil {
+		// If the target file doesn't exist (e.g. new file for write_file),
+		// we check the parent directory.
+		if os.IsNotExist(err) {
+			parent := filepath.Dir(absTarget)
+			canonicalParent, err := filepath.EvalSymlinks(parent)
+			if err != nil {
+				// If parent also doesn't exist, we can't easily validate.
+				// But write_file usually requires the directory to exist (os.WriteFile doesn't mkdir -p).
+				// So if parent doesn't exist, the operation will likely fail later anyway.
+				// We return error here to be safe.
+				return "", fmt.Errorf("failed to resolve parent path of target: %w", err)
+			}
+			canonicalTarget = filepath.Join(canonicalParent, filepath.Base(absTarget))
+		} else {
+			return "", fmt.Errorf("failed to resolve target path symlinks: %w", err)
+		}
+	}
+
+	rel, err := filepath.Rel(canonicalWorkspace, canonicalTarget)
 	if err != nil {
 		return "", fmt.Errorf("failed to resolve path relative to workspace: %w", err)
 	}
@@ -52,7 +89,7 @@ func validatePath(workspace, target string) (string, error) {
 		return "", fmt.Errorf("access denied: path %q is outside workspace", target)
 	}
 
-	return absTarget, nil
+	return canonicalTarget, nil
 }
 
 // NewReadFileTool creates the read_file tool
@@ -101,7 +138,7 @@ func NewReadFileTool(workspacePath string) (tool.InvokableTool, error) {
 						}
 
 						// If this is the (Offset + Limit)-th newline, stop reading (endOffset).
-						if input.Limit > 0 && currentNewlineCount == (input.Offset + input.Limit) {
+						if input.Limit > 0 && currentNewlineCount == (input.Offset+input.Limit) {
 							endOffset = currentPos + int64(i)
 						}
 					}

@@ -7,3 +7,8 @@
 **Vulnerability:** The `exec` tool honored `WorkingDir` parameter even when `restrictToWorkspace` was enabled, allowing execution of commands in arbitrary directories.
 **Learning:** Configuration flags like `restrictToWorkspace` must be enforced on all input parameters that affect file system access, not just the command itself.
 **Prevention:** Validate `WorkingDir` against the workspace root using the same path validation logic as filesystem tools.
+
+## 2025-04-14 - Symlink Path Traversal
+**Vulnerability:** The `validatePath` function used `filepath.Clean` and `filepath.Rel` but failed to resolve symbolic links using `filepath.EvalSymlinks`, allowing access to files outside the workspace via symlinks pointing to external locations.
+**Learning:** Checking for `..` in relative paths is insufficient if symlinks are not resolved, as the logical path may be inside the workspace while the physical path is outside.
+**Prevention:** Always use `filepath.EvalSymlinks` to resolve both the workspace root and the target path to their canonical physical paths before verifying containment.

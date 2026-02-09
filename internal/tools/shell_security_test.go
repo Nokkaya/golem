@@ -70,18 +70,18 @@ func TestExecTool_Security_RestrictToWorkspace(t *testing.T) {
 		t.Fatalf("Valid command failed: %s", outputValid.Stderr)
 	}
 
-    // 3. Valid Case: Default WorkingDir (empty)
-    inputDefault := ExecInput{
-        Command: "ls",
-    }
-    inputDefaultJson, _ := json.Marshal(inputDefault)
-    outputDefaultJson, err := tool.InvokableRun(ctx, string(inputDefaultJson))
-    if err != nil {
-        t.Fatalf("Tool execution failed: %v", err)
-    }
-    var outputDefault ExecOutput
-    json.Unmarshal([]byte(outputDefaultJson), &outputDefault)
-    if outputDefault.ExitCode != 0 {
-        t.Fatalf("Default command failed: %s", outputDefault.Stderr)
-    }
+	// 3. Valid Case: Default WorkingDir (empty)
+	inputDefault := ExecInput{
+		Command: "ls",
+	}
+	inputDefaultJson, _ := json.Marshal(inputDefault)
+	outputDefaultJson, err := tool.InvokableRun(ctx, string(inputDefaultJson))
+	if err != nil {
+		t.Fatalf("Tool execution failed: %v", err)
+	}
+	var outputDefault ExecOutput
+	json.Unmarshal([]byte(outputDefaultJson), &outputDefault)
+	if outputDefault.ExitCode != 0 {
+		t.Fatalf("Default command failed: %s", outputDefault.Stderr)
+	}
 }

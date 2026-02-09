@@ -78,6 +78,52 @@ func TestPathTraversal_RelativePath(t *testing.T) {
 	}
 }
 
+func TestPathTraversal_Symlink(t *testing.T) {
+	tmpDir := t.TempDir()
+	outsideFile := filepath.Join(tmpDir, "outside.txt")
+	err := os.WriteFile(outsideFile, []byte("secret content"), 0644)
+	if err != nil {
+		t.Fatalf("failed to create outside file: %v", err)
+	}
+
+	workspaceDir := filepath.Join(tmpDir, "workspace")
+	err = os.Mkdir(workspaceDir, 0755)
+	if err != nil {
+		t.Fatalf("failed to create workspace dir: %v", err)
+	}
+
+	// Create a symlink in workspace pointing to the outside file
+	symlinkPath := filepath.Join(workspaceDir, "link_to_secret.txt")
+	err = os.Symlink(outsideFile, symlinkPath)
+	if err != nil {
+		t.Fatalf("failed to create symlink: %v", err)
+	}
+
+	tool, err := NewReadFileTool(workspaceDir)
+	if err != nil {
+		t.Fatalf("NewReadFileTool error: %v", err)
+	}
+
+	ctx := context.Background()
+	// Attempt to read via symlink
+	argsJSON := fmt.Sprintf(`{"path": "link_to_secret.txt"}`)
+
+	result, err := tool.InvokableRun(ctx, argsJSON)
+
+	// Now we expect an ERROR because we fixed it.
+	if err == nil {
+		t.Fatalf("SECURITY FAILURE: Was able to read file outside workspace via symlink! Result: %s", result)
+	}
+
+	// We might get "failed to resolve target path symlinks" or "access denied" depending on implementation details,
+	// but mostly "access denied" if resolved path is outside.
+	// Actually, if resolved path is outside, filepath.Rel will return "../..." and we check for ".." prefix.
+	// So we expect "access denied".
+	if !strings.Contains(err.Error(), "access denied") {
+		t.Errorf("Expected 'access denied' error, got: %v", err)
+	}
+}
+
 func TestReadFileEdgeCases(t *testing.T) {
 	tmpDir := t.TempDir()
 	tool, err := NewReadFileTool(tmpDir)
