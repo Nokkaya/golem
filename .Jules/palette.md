@@ -1,3 +1,3 @@
-## 2024-05-22 - TUI Loading State Layout Stability
-**Learning:** In Terminal UIs (Bubble Tea), transient elements like loading spinners can cause jarring layout shifts if space isn't reserved.
-**Action:** When adding a spinner that appears/disappears, reserve the vertical space (e.g., subtract an extra line from viewport calculation) even when it's hidden, or overlay it if possible. In this case, reserving a line `height - textarea - 2` kept the layout stable.
+## 2024-05-23 - Visual Error Feedback in TUI
+**Learning:** TUI applications often fail silently or with subtle UI changes (spinner stopping) when backend errors occur. Explicitly rendering errors into the chat history ensures the user knows what happened and provides a persistent record of the failure.
+**Action:** Always verify how `error` types are handled in `Update` loops of Bubble Tea applications. Ensure they are user-visible, not just internal state updates.
