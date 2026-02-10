@@ -31,28 +31,54 @@ func validatePath(workspace, target string) (string, error) {
 		return target, nil
 	}
 
+	// Resolve workspace path to its canonical form
 	absWorkspace, err := filepath.Abs(workspace)
 	if err != nil {
 		return "", fmt.Errorf("failed to resolve workspace path: %w", err)
+	}
+
+	realWorkspace, err := filepath.EvalSymlinks(absWorkspace)
+	if err != nil {
+		return "", fmt.Errorf("failed to resolve workspace real path: %w", err)
 	}
 
 	var absTarget string
 	if filepath.IsAbs(target) {
 		absTarget = filepath.Clean(target)
 	} else {
-		absTarget = filepath.Join(absWorkspace, target)
+		absTarget = filepath.Join(realWorkspace, target)
 	}
 
-	rel, err := filepath.Rel(absWorkspace, absTarget)
+	// Resolve target path to its canonical form
+	// We need to handle the case where the file doesn't exist (for write operations)
+	realTarget := absTarget
+
+	// Try to resolve the full path first
+	resolved, err := filepath.EvalSymlinks(absTarget)
+	if err == nil {
+		realTarget = resolved
+	} else if os.IsNotExist(err) {
+		// If file doesn't exist, verify the directory containing it
+		dir := filepath.Dir(absTarget)
+		realDir, err := filepath.EvalSymlinks(dir)
+		if err != nil {
+			return "", fmt.Errorf("failed to resolve parent directory: %w", err)
+		}
+		realTarget = filepath.Join(realDir, filepath.Base(absTarget))
+	} else {
+		return "", fmt.Errorf("failed to resolve path: %w", err)
+	}
+
+	rel, err := filepath.Rel(realWorkspace, realTarget)
 	if err != nil {
 		return "", fmt.Errorf("failed to resolve path relative to workspace: %w", err)
 	}
 
 	if strings.HasPrefix(rel, "..") || rel == ".." {
-		return "", fmt.Errorf("access denied: path %q is outside workspace", target)
+		return "", fmt.Errorf("access denied: path %q resolves to %q which is outside workspace", target, realTarget)
 	}
 
-	return absTarget, nil
+	return realTarget, nil
 }
 
 // NewReadFileTool creates the read_file tool
