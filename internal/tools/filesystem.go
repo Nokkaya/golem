@@ -1,6 +1,7 @@
 package tools
 
 import (
+	"bytes"
 	"context"
 	"fmt"
 	"io"
@@ -89,22 +90,45 @@ func NewReadFileTool(workspacePath string) (tool.InvokableTool, error) {
 			n, err := file.Read(buf)
 			if n > 0 {
 				chunk := buf[:n]
+				var processed int
+				chunkLen := len(chunk)
 
-				// Count newlines in this chunk
-				for i, b := range chunk {
-					if b == '\n' {
-						currentNewlineCount++
-						// Found a newline.
-						// If this is the Offset-th newline, start reading from next byte.
-						if input.Offset > 0 && currentNewlineCount == input.Offset {
-							startOffset = currentPos + int64(i) + 1
-						}
+				// Process chunk
+				for processed < chunkLen {
+					// Optimization: If we have identified the byte range we need, we can switch to faster counting
+					// The range is identified if:
+					// 1. Start is found (either Offset=0 or we found the start newline)
+					// 2. End is found (either Limit=0 or we found the end newline)
+					startFound := input.Offset == 0 || startOffset != -1
+					endFound := input.Limit == 0 || endOffset != -1
 
-						// If this is the (Offset + Limit)-th newline, stop reading (endOffset).
-						if input.Limit > 0 && currentNewlineCount == (input.Offset + input.Limit) {
-							endOffset = currentPos + int64(i)
-						}
+					if startFound && endFound {
+						// Just count the rest using SIMD-optimized Count
+						currentNewlineCount += bytes.Count(chunk[processed:], []byte{'\n'})
+						break
 					}
+
+					// Find next newline
+					idx := bytes.IndexByte(chunk[processed:], '\n')
+					if idx == -1 {
+						break
+					}
+
+					// Found a newline at relative index 'idx'
+					realIdx := processed + idx
+					currentNewlineCount++
+
+					// If this is the Offset-th newline, start reading from next byte.
+					if input.Offset > 0 && currentNewlineCount == input.Offset {
+						startOffset = currentPos + int64(realIdx) + 1
+					}
+
+					// If this is the (Offset + Limit)-th newline, stop reading (endOffset).
+					if input.Limit > 0 && currentNewlineCount == (input.Offset+input.Limit) {
+						endOffset = currentPos + int64(realIdx)
+					}
+
+					processed = realIdx + 1
 				}
 				currentPos += int64(n)
 			}
