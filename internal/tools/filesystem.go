@@ -1,6 +1,7 @@
 package tools
 
 import (
+	"bytes"
 	"context"
 	"fmt"
 	"io"
@@ -90,19 +91,48 @@ func NewReadFileTool(workspacePath string) (tool.InvokableTool, error) {
 			if n > 0 {
 				chunk := buf[:n]
 
-				// Count newlines in this chunk
-				for i, b := range chunk {
-					if b == '\n' {
-						currentNewlineCount++
-						// Found a newline.
-						// If this is the Offset-th newline, start reading from next byte.
-						if input.Offset > 0 && currentNewlineCount == input.Offset {
-							startOffset = currentPos + int64(i) + 1
+				// If we have already found both start and end offsets, or start offset found and no limit,
+				// we can switch to a faster counting mode.
+				// Condition: (startOffset != -1 or Offset==0) AND (Limit==0 or endOffset != -1)
+				startFound := (input.Offset == 0) || (startOffset != -1)
+				endFound := (input.Limit == 0) || (endOffset != -1)
+
+				if startFound && endFound {
+					// Fast path: just count newlines
+					currentNewlineCount += bytes.Count(chunk, []byte{'\n'})
+				} else {
+					// Slow path: find specific newlines
+					chunkOffset := 0
+					for {
+						idx := bytes.IndexByte(chunk[chunkOffset:], '\n')
+						if idx == -1 {
+							break
 						}
 
-						// If this is the (Offset + Limit)-th newline, stop reading (endOffset).
+						actualIdx := chunkOffset + idx
+						currentNewlineCount++
+
+						// Check start offset
+						if input.Offset > 0 && currentNewlineCount == input.Offset {
+							startOffset = currentPos + int64(actualIdx) + 1
+						}
+
+						// Check end offset
 						if input.Limit > 0 && currentNewlineCount == (input.Offset + input.Limit) {
-							endOffset = currentPos + int64(i)
+							endOffset = currentPos + int64(actualIdx)
+						}
+
+						chunkOffset += idx + 1
+
+						// Check if we can stop detailed scanning in this chunk
+						startFound = (input.Offset == 0) || (startOffset != -1)
+						endFound = (input.Limit == 0) || (endOffset != -1)
+
+						if startFound && endFound {
+							// Process remaining part of this chunk with bytes.Count
+							remaining := chunk[chunkOffset:]
+							currentNewlineCount += bytes.Count(remaining, []byte{'\n'})
+							break
 						}
 					}
 				}
