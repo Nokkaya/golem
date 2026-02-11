@@ -36,6 +36,12 @@ func validatePath(workspace, target string) (string, error) {
 		return "", fmt.Errorf("failed to resolve workspace path: %w", err)
 	}
 
+	// Resolve any symlinks in the workspace path itself to ensure we have the canonical path
+	absWorkspace, err = filepath.EvalSymlinks(absWorkspace)
+	if err != nil {
+		return "", fmt.Errorf("failed to resolve workspace path symlinks: %w", err)
+	}
+
 	var absTarget string
 	if filepath.IsAbs(target) {
 		absTarget = filepath.Clean(target)
@@ -43,7 +49,39 @@ func validatePath(workspace, target string) (string, error) {
 		absTarget = filepath.Join(absWorkspace, target)
 	}
 
-	rel, err := filepath.Rel(absWorkspace, absTarget)
+	// Resolve any symlinks in the target path
+	realPath, err := filepath.EvalSymlinks(absTarget)
+	if err != nil {
+		if os.IsNotExist(err) {
+			// File doesn't exist (or is a broken symlink)
+
+			// Check if the path itself exists as a symlink (broken symlink)
+			// We use Lstat which does not follow symlinks
+			lstatInfo, lstatErr := os.Lstat(absTarget)
+			if lstatErr == nil {
+				// The file entry exists!
+				if lstatInfo.Mode()&os.ModeSymlink != 0 {
+					// It is a symlink. Since EvalSymlinks failed, it's a broken symlink.
+					// We deny access because we can't verify where it points to safely without following it,
+					// and following it failed (broken). Even if we could readlink, allowing broken symlinks
+					// that point outside is dangerous if the target is later created.
+					return "", fmt.Errorf("access denied: target is a broken symlink")
+				}
+			}
+
+			// File doesn't exist, check parent
+			parent := filepath.Dir(absTarget)
+			realParent, err := filepath.EvalSymlinks(parent)
+			if err != nil {
+				return "", fmt.Errorf("failed to resolve path: %w", err)
+			}
+			realPath = filepath.Join(realParent, filepath.Base(absTarget))
+		} else {
+			return "", fmt.Errorf("failed to resolve path: %w", err)
+		}
+	}
+
+	rel, err := filepath.Rel(absWorkspace, realPath)
 	if err != nil {
 		return "", fmt.Errorf("failed to resolve path relative to workspace: %w", err)
 	}
@@ -52,7 +90,7 @@ func validatePath(workspace, target string) (string, error) {
 		return "", fmt.Errorf("access denied: path %q is outside workspace", target)
 	}
 
-	return absTarget, nil
+	return realPath, nil
 }
 
 // NewReadFileTool creates the read_file tool
