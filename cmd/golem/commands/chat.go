@@ -202,6 +202,13 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		switch msg.Type {
 		case tea.KeyCtrlC, tea.KeyEsc:
 			return m, tea.Quit
+		case tea.KeyCtrlL:
+			m.history.Reset()
+			m.history.WriteString(`Welcome to Golem Chat!
+Type a message and press Enter to send.`)
+			m.viewport.SetContent(m.history.String())
+			m.viewport.GotoBottom()
+			return m, nil
 		case tea.KeyEnter:
 			if m.textarea.Value() == "" {
 				return m, nil
@@ -279,7 +286,7 @@ func (m model) View() string {
 	if m.loading {
 		spinnerView = m.spinner.View() + " Thinking..."
 	}
-	helpView := m.helpStyle.Render("  Esc: quit • Enter: send")
+	helpView := m.helpStyle.Render("  Esc: quit • Enter: send • Ctrl+L: clear")
 	return fmt.Sprintf(
 		"%s\n%s\n%s\n%s",
 		m.viewport.View(),
