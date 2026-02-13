@@ -1,6 +1,7 @@
 package tools
 
 import (
+	"bytes"
 	"context"
 	"fmt"
 	"io"
@@ -90,21 +91,33 @@ func NewReadFileTool(workspacePath string) (tool.InvokableTool, error) {
 			if n > 0 {
 				chunk := buf[:n]
 
-				// Count newlines in this chunk
-				for i, b := range chunk {
-					if b == '\n' {
-						currentNewlineCount++
-						// Found a newline.
-						// If this is the Offset-th newline, start reading from next byte.
-						if input.Offset > 0 && currentNewlineCount == input.Offset {
-							startOffset = currentPos + int64(i) + 1
-						}
+				// Count newlines in this chunk using bytes.IndexByte for performance
+				searchBuf := chunk
+				var searchOffset int64 = 0
 
-						// If this is the (Offset + Limit)-th newline, stop reading (endOffset).
-						if input.Limit > 0 && currentNewlineCount == (input.Offset + input.Limit) {
-							endOffset = currentPos + int64(i)
-						}
+				for {
+					idx := bytes.IndexByte(searchBuf, '\n')
+					if idx == -1 {
+						break
 					}
+
+					currentNewlineCount++
+					newlinePos := currentPos + searchOffset + int64(idx)
+
+					// Found a newline.
+					// If this is the Offset-th newline, start reading from next byte.
+					if input.Offset > 0 && currentNewlineCount == input.Offset {
+						startOffset = newlinePos + 1
+					}
+
+					// If this is the (Offset + Limit)-th newline, stop reading (endOffset).
+					if input.Limit > 0 && currentNewlineCount == (input.Offset+input.Limit) {
+						endOffset = newlinePos
+					}
+
+					// Move search buffer past the newline
+					searchBuf = searchBuf[idx+1:]
+					searchOffset += int64(idx) + 1
 				}
 				currentPos += int64(n)
 			}
