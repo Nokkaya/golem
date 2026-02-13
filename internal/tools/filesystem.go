@@ -36,6 +36,11 @@ func validatePath(workspace, target string) (string, error) {
 		return "", fmt.Errorf("failed to resolve workspace path: %w", err)
 	}
 
+	canonicalWorkspace, err := filepath.EvalSymlinks(absWorkspace)
+	if err != nil {
+		return "", fmt.Errorf("failed to resolve workspace symlinks: %w", err)
+	}
+
 	var absTarget string
 	if filepath.IsAbs(target) {
 		absTarget = filepath.Clean(target)
@@ -43,16 +48,50 @@ func validatePath(workspace, target string) (string, error) {
 		absTarget = filepath.Join(absWorkspace, target)
 	}
 
-	rel, err := filepath.Rel(absWorkspace, absTarget)
+	// Resolve symlinks in the target path to find its canonical location
+	var canonicalTarget string
+	info, err := os.Lstat(absTarget)
+	if err == nil {
+		// File exists
+		if info.Mode()&os.ModeSymlink != 0 {
+			// It's a symlink, resolve it
+			canonicalTarget, err = filepath.EvalSymlinks(absTarget)
+			if err != nil {
+				return "", fmt.Errorf("failed to resolve symlink %q: %w", absTarget, err)
+			}
+		} else {
+			// Not a symlink, but parent directories might be symlinks
+			// EvalSymlinks handles resolving all components
+			canonicalTarget, err = filepath.EvalSymlinks(absTarget)
+			if err != nil {
+				return "", fmt.Errorf("failed to resolve path %q: %w", absTarget, err)
+			}
+		}
+	} else if os.IsNotExist(err) {
+		// File does not exist, check if parent directory exists and is safe
+		parent := filepath.Dir(absTarget)
+		canonicalParent, err := filepath.EvalSymlinks(parent)
+		if err != nil {
+			if os.IsNotExist(err) {
+				return "", fmt.Errorf("parent directory %q does not exist", parent)
+			}
+			return "", fmt.Errorf("failed to resolve parent path %q: %w", parent, err)
+		}
+		canonicalTarget = filepath.Join(canonicalParent, filepath.Base(absTarget))
+	} else {
+		return "", fmt.Errorf("failed to stat path %q: %w", absTarget, err)
+	}
+
+	rel, err := filepath.Rel(canonicalWorkspace, canonicalTarget)
 	if err != nil {
 		return "", fmt.Errorf("failed to resolve path relative to workspace: %w", err)
 	}
 
 	if strings.HasPrefix(rel, "..") || rel == ".." {
-		return "", fmt.Errorf("access denied: path %q is outside workspace", target)
+		return "", fmt.Errorf("access denied: path %q resolves to %q which is outside workspace", target, canonicalTarget)
 	}
 
-	return absTarget, nil
+	return canonicalTarget, nil
 }
 
 // NewReadFileTool creates the read_file tool

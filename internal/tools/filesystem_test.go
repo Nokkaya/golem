@@ -78,6 +78,61 @@ func TestPathTraversal_RelativePath(t *testing.T) {
 	}
 }
 
+func TestPathTraversal_Symlink(t *testing.T) {
+	// Create a temporary directory for the test
+	tmpDir := t.TempDir()
+
+	// Create a "secret" file outside the workspace
+	secretFile := filepath.Join(tmpDir, "secret.txt")
+	err := os.WriteFile(secretFile, []byte("super secret data"), 0644)
+	if err != nil {
+		t.Fatalf("failed to create secret file: %v", err)
+	}
+
+	// Create a workspace directory
+	workspaceDir := filepath.Join(tmpDir, "workspace")
+	err = os.Mkdir(workspaceDir, 0755)
+	if err != nil {
+		t.Fatalf("failed to create workspace dir: %v", err)
+	}
+
+	// Create a symlink inside the workspace that points to the secret file
+	symlinkPath := filepath.Join(workspaceDir, "link_to_secret")
+	err = os.Symlink(secretFile, symlinkPath)
+	if err != nil {
+		t.Fatalf("failed to create symlink: %v", err)
+	}
+
+	// Initialize the read_file tool restricted to the workspace
+	tool, err := NewReadFileTool(workspaceDir)
+	if err != nil {
+		t.Fatalf("NewReadFileTool error: %v", err)
+	}
+
+	ctx := context.Background()
+	// Attempt to read the secret file via the symlink
+	// The path passed to the tool is just "link_to_secret", which is seemingly inside the workspace
+	argsJSON := fmt.Sprintf(`{"path": "link_to_secret"}`)
+
+	result, err := tool.InvokableRun(ctx, argsJSON)
+
+	// If the tool is secure, it should DENY access or fail to read content that is outside the workspace
+	// However, without EvalSymlinks, it will likely succeed.
+
+	if err == nil {
+		// If we get here, it means the read succeeded.
+		// Check if we actually read the secret data.
+		if strings.Contains(result, "super secret data") {
+			t.Fatalf("SECURITY FAILURE: Was able to read file outside workspace via symlink! Result: %s", result)
+		}
+	} else {
+        // If it failed, that's good! But let's check the error message.
+        if !strings.Contains(err.Error(), "access denied") && !strings.Contains(err.Error(), "outside workspace") {
+             t.Logf("Read failed with unexpected error: %v", err)
+        }
+    }
+}
+
 func TestReadFileEdgeCases(t *testing.T) {
 	tmpDir := t.TempDir()
 	tool, err := NewReadFileTool(tmpDir)

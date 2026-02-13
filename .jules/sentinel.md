@@ -7,3 +7,8 @@
 **Vulnerability:** The `exec` tool honored `WorkingDir` parameter even when `restrictToWorkspace` was enabled, allowing execution of commands in arbitrary directories.
 **Learning:** Configuration flags like `restrictToWorkspace` must be enforced on all input parameters that affect file system access, not just the command itself.
 **Prevention:** Validate `WorkingDir` against the workspace root using the same path validation logic as filesystem tools.
+
+## 2026-02-13 - Symlink Bypass in Path Validation
+**Vulnerability:** The path validation logic checked string paths but failed to resolve symbolic links. A symlink inside the workspace pointing to a file outside (e.g., `/workspace/link -> /etc/passwd`) would bypass the check because the path string appeared to be within the workspace.
+**Learning:** Checking path strings is insufficient for security boundaries. The canonical path (resolved symlinks) must always be used.
+**Prevention:** Use `filepath.EvalSymlinks` on both the workspace root and the target path (or its parent directory if the target does not exist) before performing any containment checks.
