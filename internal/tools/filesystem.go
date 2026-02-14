@@ -36,6 +36,12 @@ func validatePath(workspace, target string) (string, error) {
 		return "", fmt.Errorf("failed to resolve workspace path: %w", err)
 	}
 
+	// Resolve symlinks in workspace path (canonical workspace)
+	canonicalWorkspace, err := filepath.EvalSymlinks(absWorkspace)
+	if err != nil {
+		return "", fmt.Errorf("failed to resolve workspace symlinks: %w", err)
+	}
+
 	var absTarget string
 	if filepath.IsAbs(target) {
 		absTarget = filepath.Clean(target)
@@ -43,16 +49,41 @@ func validatePath(workspace, target string) (string, error) {
 		absTarget = filepath.Join(absWorkspace, target)
 	}
 
-	rel, err := filepath.Rel(absWorkspace, absTarget)
+	// Resolve symlinks in target path (canonical target)
+	var canonicalTarget string
+
+	// Check if target exists
+	_, err = os.Stat(absTarget)
+	if err == nil {
+		// Exists, resolve it
+		canonicalTarget, err = filepath.EvalSymlinks(absTarget)
+		if err != nil {
+			return "", fmt.Errorf("failed to resolve target symlinks: %w", err)
+		}
+	} else if os.IsNotExist(err) {
+		// Doesn't exist, resolve parent
+		parent := filepath.Dir(absTarget)
+		canonicalParent, err := filepath.EvalSymlinks(parent)
+		if err != nil {
+			// If parent also doesn't exist, we could recurse, but usually write_file expects parent to exist?
+			// Standard behavior for os.WriteFile is parent must exist.
+			return "", fmt.Errorf("failed to resolve parent directory symlinks: %w", err)
+		}
+		canonicalTarget = filepath.Join(canonicalParent, filepath.Base(absTarget))
+	} else {
+		return "", fmt.Errorf("failed to stat target: %w", err)
+	}
+
+	rel, err := filepath.Rel(canonicalWorkspace, canonicalTarget)
 	if err != nil {
 		return "", fmt.Errorf("failed to resolve path relative to workspace: %w", err)
 	}
 
 	if strings.HasPrefix(rel, "..") || rel == ".." {
-		return "", fmt.Errorf("access denied: path %q is outside workspace", target)
+		return "", fmt.Errorf("access denied: path %q resolves to %q which is outside workspace %q", target, canonicalTarget, canonicalWorkspace)
 	}
 
-	return absTarget, nil
+	return canonicalTarget, nil
 }
 
 // NewReadFileTool creates the read_file tool
