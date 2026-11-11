@@ -114,7 +114,8 @@ func (c *Channel) Send(ctx context.Context, msg *bus.OutboundMessage) error {
 	}
 
 	req := larkim.NewCreateMessageReqBuilder().
-		ReceiveIdType(larkim.ReceiveIdTypeChatId).
+		// oapi-sdk-go v3.12 removed larkim.ReceiveIdTypeChatId; the API value is unchanged.
+		ReceiveIdType("chat_id").
 		Body(larkim.NewCreateMessageReqBodyBuilder().
 			ReceiveId(msg.ChatID).
 			MsgType(larkim.MsgTypeText).
