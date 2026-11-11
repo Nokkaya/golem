@@ -70,18 +70,86 @@ func TestExecTool_Security_RestrictToWorkspace(t *testing.T) {
 		t.Fatalf("Valid command failed: %s", outputValid.Stderr)
 	}
 
-    // 3. Valid Case: Default WorkingDir (empty)
-    inputDefault := ExecInput{
-        Command: "ls",
-    }
-    inputDefaultJson, _ := json.Marshal(inputDefault)
-    outputDefaultJson, err := tool.InvokableRun(ctx, string(inputDefaultJson))
-    if err != nil {
-        t.Fatalf("Tool execution failed: %v", err)
-    }
-    var outputDefault ExecOutput
-    json.Unmarshal([]byte(outputDefaultJson), &outputDefault)
-    if outputDefault.ExitCode != 0 {
-        t.Fatalf("Default command failed: %s", outputDefault.Stderr)
-    }
+	// 3. Valid Case: Default WorkingDir (empty)
+	inputDefault := ExecInput{
+		Command: "ls",
+	}
+	inputDefaultJson, _ := json.Marshal(inputDefault)
+	outputDefaultJson, err := tool.InvokableRun(ctx, string(inputDefaultJson))
+	if err != nil {
+		t.Fatalf("Tool execution failed: %v", err)
+	}
+	var outputDefault ExecOutput
+	json.Unmarshal([]byte(outputDefaultJson), &outputDefault)
+	if outputDefault.ExitCode != 0 {
+		t.Fatalf("Default command failed: %s", outputDefault.Stderr)
+	}
+}
+
+func TestExecTool_Security_SymlinkWorkingDirOutside(t *testing.T) {
+	tmp := t.TempDir()
+	workspace := filepath.Join(tmp, "workspace")
+	outside := filepath.Join(tmp, "outside")
+	if err := os.Mkdir(workspace, 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Mkdir(outside, 0755); err != nil {
+		t.Fatal(err)
+	}
+	link := filepath.Join(workspace, "escape")
+	if err := os.Symlink(outside, link); err != nil {
+		t.Fatal(err)
+	}
+
+	tool, err := NewExecTool(10, true, workspace)
+	if err != nil {
+		t.Fatal(err)
+	}
+	input, _ := json.Marshal(ExecInput{Command: "pwd", WorkingDir: link})
+	outputJSON, err := tool.InvokableRun(context.Background(), string(input))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var output ExecOutput
+	if err := json.Unmarshal([]byte(outputJSON), &output); err != nil {
+		t.Fatal(err)
+	}
+	if output.ExitCode == 0 {
+		t.Fatalf("SECURITY FAILURE: command ran via symlink working dir: %s", output.Stdout)
+	}
+	if !strings.Contains(output.Stderr, "access denied") && !strings.Contains(output.Stderr, "outside") {
+		t.Fatalf("expected access denied, got %s", output.Stderr)
+	}
+}
+
+func TestExecTool_Security_RelativeWorkingDirInside(t *testing.T) {
+	workspace := t.TempDir()
+	sub := filepath.Join(workspace, "sub")
+	if err := os.Mkdir(sub, 0755); err != nil {
+		t.Fatal(err)
+	}
+	resolved, err := filepath.EvalSymlinks(sub)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	tool, err := NewExecTool(10, true, workspace)
+	if err != nil {
+		t.Fatal(err)
+	}
+	input, _ := json.Marshal(ExecInput{Command: "pwd", WorkingDir: "sub"})
+	outputJSON, err := tool.InvokableRun(context.Background(), string(input))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var output ExecOutput
+	if err := json.Unmarshal([]byte(outputJSON), &output); err != nil {
+		t.Fatal(err)
+	}
+	if output.ExitCode != 0 {
+		t.Fatalf("relative working dir inside workspace failed: %s", output.Stderr)
+	}
+	if !strings.Contains(output.Stdout, resolved) {
+		t.Fatalf("pwd = %q, want path under %s", output.Stdout, resolved)
+	}
 }

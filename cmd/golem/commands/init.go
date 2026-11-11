@@ -6,9 +6,11 @@ import (
 	"path/filepath"
 
 	"github.com/MEKXH/golem/internal/config"
+	"github.com/MEKXH/golem/internal/skills"
 	"github.com/spf13/cobra"
 )
 
+// NewInitCmd 创建初始化 Golem 配置与工作区的命令。
 func NewInitCmd() *cobra.Command {
 	return &cobra.Command{
 		Use:   "init",
@@ -20,6 +22,12 @@ func NewInitCmd() *cobra.Command {
 func runInit(cmd *cobra.Command, args []string) error {
 	configPath := config.ConfigPath()
 
+	// 确保内置技能目录已准备就绪
+	if err := skills.EnsureBuiltinSkills(config.ConfigDir()); err != nil {
+		return fmt.Errorf("failed to initialize builtin skills: %w", err)
+	}
+
+	// 检查配置文件是否已存在，避免覆盖
 	if _, err := os.Stat(configPath); err == nil {
 		fmt.Printf("Config already exists: %s\n", configPath)
 		return nil
@@ -31,11 +39,13 @@ func runInit(cmd *cobra.Command, args []string) error {
 		return fmt.Errorf("invalid workspace: %w", err)
 	}
 
+	// 创建必要的基础目录结构
 	dirs := []string{
 		config.ConfigDir(),
 		workspacePath,
 		filepath.Join(workspacePath, "memory"),
 		filepath.Join(workspacePath, "skills"),
+		filepath.Join(workspacePath, "cron"),
 		filepath.Join(config.ConfigDir(), "sessions"),
 	}
 
@@ -45,15 +55,18 @@ func runInit(cmd *cobra.Command, args []string) error {
 		}
 	}
 
+	// 保存默认生成的配置文件
 	if err := config.Save(cfg); err != nil {
 		return fmt.Errorf("failed to save config: %w", err)
 	}
 
+	// 创建初始的 Markdown 引导文件
 	workspaceFiles := map[string]string{
-		"IDENTITY.md": "# Identity\n\nYou are Golem, a helpful AI assistant.",
-		"SOUL.md":     "# Soul\n\nBe helpful, concise, and proactive.",
-		"USER.md":     "# User\n\nInformation about the user goes here.",
-		"AGENTS.md":   "# Agents\n\nAgent-specific instructions go here.",
+		"IDENTITY.md":      "# Identity\n\nYou are Golem, a helpful AI assistant.",
+		"SOUL.md":          "# Soul\n\nBe helpful, concise, and proactive.",
+		"USER.md":          "# User\n\nInformation about the user goes here.",
+		"AGENTS.md":        "# Agents\n\nAgent-specific instructions go here.",
+		"memory/MEMORY.md": "",
 	}
 
 	for name, content := range workspaceFiles {

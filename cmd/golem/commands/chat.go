@@ -3,15 +3,15 @@ package commands
 import (
 	"context"
 	"fmt"
-	"io"
-	"log/slog"
-	"regexp"
 	"strings"
 
 	"github.com/MEKXH/golem/internal/agent"
 	"github.com/MEKXH/golem/internal/bus"
 	"github.com/MEKXH/golem/internal/config"
+	"github.com/MEKXH/golem/internal/metrics"
 	"github.com/MEKXH/golem/internal/provider"
+	"github.com/MEKXH/golem/internal/render"
+	"github.com/MEKXH/golem/internal/version"
 	"github.com/charmbracelet/bubbles/spinner"
 	"github.com/charmbracelet/bubbles/textarea"
 	"github.com/charmbracelet/bubbles/viewport"
@@ -21,6 +21,64 @@ import (
 	"github.com/spf13/cobra"
 )
 
+const (
+// 无固定宽度常量，依赖于实时更新的窗口宽度
+)
+
+var (
+	// 样式定义
+	userHeaderStyle = lipgloss.NewStyle().
+			Foreground(lipgloss.Color("#FAFAFA")).
+			Background(lipgloss.Color("#8E4EC6")). // 紫色
+			Bold(true).
+			Padding(0, 1)
+
+	userBodyStyle = lipgloss.NewStyle().
+			Border(lipgloss.RoundedBorder()).
+			BorderForeground(lipgloss.Color("#8E4EC6")).
+			Padding(0, 1)
+
+	golemHeaderStyle = lipgloss.NewStyle().
+				Foreground(lipgloss.Color("#FAFAFA")).
+				Background(lipgloss.Color("#2E8B57")). // 海洋绿
+				Bold(true).
+				Padding(0, 1)
+
+	golemBodyStyle = lipgloss.NewStyle().
+			Border(lipgloss.RoundedBorder()).
+			BorderForeground(lipgloss.Color("#2E8B57")).
+			Padding(0, 1)
+
+	toolLogStyle = lipgloss.NewStyle().
+			Foreground(lipgloss.Color("#888888")).
+			Italic(true)
+
+	helpStyle = lipgloss.NewStyle().
+			Foreground(lipgloss.Color("241")).
+			Padding(0, 1)
+
+	keyStyle = lipgloss.NewStyle().
+			Foreground(lipgloss.Color("#FAFAFA")).
+			Background(lipgloss.Color("240")).
+			Padding(0, 1).
+			Bold(true)
+
+	descStyle = lipgloss.NewStyle().
+			Foreground(lipgloss.Color("241")).
+			PaddingLeft(1).
+			PaddingRight(2)
+)
+
+// Golem ASCII 艺术字
+const golemArt = `
+   ______      __
+  / ____/___  / /__  ____ ___
+ / / __/ __ \/ / _ \/ __  __ \
+/ /_/ / /_/ / /  __/ / / / / /
+\____/\____/_/\___/_/ /_/ /_/
+`
+
+// NewChatCmd 创建交互式聊天命令。
 func NewChatCmd() *cobra.Command {
 	return &cobra.Command{
 		Use:   "chat [message]",
@@ -48,48 +106,68 @@ func renderMarkdown(r markdownRenderer, input string) string {
 	return rendered
 }
 
-func splitThink(content string) (string, string, bool) {
-	re := regexp.MustCompile(`(?s)<think>(.*?)</think>`)
-	matches := re.FindStringSubmatch(content)
-	if len(matches) > 1 {
-		think := strings.TrimSpace(matches[1])
-		main := strings.TrimSpace(re.ReplaceAllString(content, ""))
-		return think, main, true
-	}
-	return "", content, false
-}
-
 func renderResponseParts(content string, r markdownRenderer) (string, string, bool) {
-	think, main, hasThink := splitThink(content)
+	think, main, hasThink := render.SplitThink(content)
 	if hasThink {
+		// 同时使用 Markdown 格式渲染思考过程和主内容
 		return renderMarkdown(r, think), renderMarkdown(r, main), true
 	}
 	return "", renderMarkdown(r, main), false
 }
 
-func indentLines(s, prefix string) string {
-	lines := strings.Split(s, "\n")
-	for i := range lines {
-		lines[i] = prefix + lines[i]
-	}
-	return strings.Join(lines, "\n")
+// 结构化历史记录的数据结构
+type ToolLog struct {
+	Name   string
+	Result string
+	Err    error
+}
+
+type ChatMessage struct {
+	Role     string // "user", "golem", "system"
+	Content  string
+	Thinking string
+	Tools    []ToolLog
+	IsError  bool
+
+	// 缓存已渲染的内容
+	renderedContent      string
+	renderedWidth        int
+	lastRenderedContent  string
+	lastRenderedThinking string
+	lastRenderedToolsLen int
 }
 
 type model struct {
-	viewport      viewport.Model
-	textarea      textarea.Model
-	spinner       spinner.Model
-	loading       bool
+	viewport viewport.Model
+	textarea textarea.Model
+	spinner  spinner.Model
+	thinking bool
+
+	// 样式
 	senderStyle   lipgloss.Style
 	aiStyle       lipgloss.Style
 	thinkingStyle lipgloss.Style
-	toolStyle     lipgloss.Style
-	helpStyle     lipgloss.Style
-	renderer      markdownRenderer
-	history       *strings.Builder
-	err           error
-	loop          *agent.Loop
-	ctx           context.Context
+
+	renderer markdownRenderer
+
+	// 消息历史
+	messages      []ChatMessage
+	currentHelper *ChatMessage // 追踪当前正在生成的消息
+
+	loop *agent.Loop
+	ctx  context.Context
+	err  error
+
+	currentTool string // 追踪当前正在运行的工具
+
+	width int // 窗口宽度，用于重新渲染
+}
+
+func welcomeMessage() ChatMessage {
+	return ChatMessage{
+		Role:    "system",
+		Content: golemArt + fmt.Sprintf("\nWelcome to Golem Chat %s\nType a message and press Enter to send.", version.Version),
+	}
 }
 
 func initialModel(ctx context.Context, loop *agent.Loop) model {
@@ -106,21 +184,27 @@ func initialModel(ctx context.Context, loop *agent.Loop) model {
 	ta.Focus()
 
 	ta.Prompt = "┃ "
-	ta.CharLimit = 280
+	ta.CharLimit = 2000
 
 	ta.SetWidth(30)
-	ta.SetHeight(3)
+	ta.SetHeight(1)
 
-	// Remove cursor line styling
 	ta.FocusedStyle.CursorLine = lipgloss.NewStyle()
 	ta.ShowLineNumbers = false
 
+	ta.FocusedStyle.Base = lipgloss.NewStyle().
+		Border(lipgloss.RoundedBorder()).
+		BorderForeground(lipgloss.Color("62")). // 偏紫色
+		Padding(0, 1)
+
+	ta.BlurredStyle.Base = lipgloss.NewStyle().
+		Border(lipgloss.RoundedBorder()).
+		BorderForeground(lipgloss.Color("240")).
+		Padding(0, 1)
+
 	vp := viewport.New(30, 5)
 
-	history := &strings.Builder{}
-	history.WriteString(`Welcome to Golem Chat!
-Type a message and press Enter to send.`)
-	vp.SetContent(history.String())
+	messages := []ChatMessage{welcomeMessage()}
 
 	ta.KeyMap.InsertNewline.SetEnabled(false)
 
@@ -128,26 +212,29 @@ Type a message and press Enter to send.`)
 	s.Spinner = spinner.Dot
 	s.Style = lipgloss.NewStyle().Foreground(lipgloss.Color("205"))
 
-	return model{
+	m := model{
 		textarea:      ta,
 		viewport:      vp,
 		spinner:       s,
-		loading:       false,
-		senderStyle:   lipgloss.NewStyle().Foreground(lipgloss.Color("5")),
-		aiStyle:       lipgloss.NewStyle().Foreground(lipgloss.Color("2")),
+		thinking:      false,
+		senderStyle:   lipgloss.NewStyle().Foreground(lipgloss.Color("5")).Bold(true),
+		aiStyle:       lipgloss.NewStyle().Foreground(lipgloss.Color("2")).Bold(true),
 		thinkingStyle: lipgloss.NewStyle().Foreground(lipgloss.Color("245")).Italic(true),
-		toolStyle:     lipgloss.NewStyle().Foreground(lipgloss.Color("240")),
-		helpStyle:     lipgloss.NewStyle().Foreground(lipgloss.Color("245")),
 		renderer:      renderer,
-		history:       history,
+		messages:      messages,
 		loop:          loop,
 		ctx:           ctx,
 		err:           nil,
+		width:         30,
 	}
+
+	m.viewport.SetContent(m.renderAll())
+
+	return m
 }
 
 func (m model) Init() tea.Cmd {
-	return textarea.Blink
+	return tea.Batch(textarea.Blink, m.spinner.Tick, tea.EnableMouseCellMotion)
 }
 
 type responseMsg string
@@ -163,51 +250,201 @@ type toolFinishMsg struct {
 	err    error
 }
 
+// renderAll 根据当前宽度重新渲染整个聊天历史
+func (m model) renderAll() string {
+	var sb strings.Builder
+
+	for i := range m.messages {
+		sb.WriteString(m.renderMessage(&m.messages[i]))
+		sb.WriteString("\n")
+	}
+
+	if m.currentHelper != nil {
+		sb.WriteString(m.renderMessage(m.currentHelper))
+	}
+
+	return sb.String()
+}
+
+func (m model) renderMessage(msg *ChatMessage) string {
+	contentWidth := m.width - 6
+	if contentWidth < 10 {
+		contentWidth = 10
+	}
+
+	// 检查缓存
+	if msg.renderedContent != "" &&
+		msg.renderedWidth == m.width &&
+		msg.Content == msg.lastRenderedContent &&
+		msg.Thinking == msg.lastRenderedThinking &&
+		len(msg.Tools) == msg.lastRenderedToolsLen {
+		return msg.renderedContent
+	}
+
+	var result string
+
+	switch msg.Role {
+	case "system":
+		style := lipgloss.NewStyle().Width(m.width).Foreground(lipgloss.Color("240"))
+		result = style.Render(msg.Content) + "\n"
+
+	case "user":
+		header := userHeaderStyle.Render("USER")
+		fullContent := header + "\n" + msg.Content
+		body := userBodyStyle.
+			Width(contentWidth).
+			Render(fullContent)
+		result = fmt.Sprintf("\n%s", body)
+
+	case "golem":
+		headerStyle := golemHeaderStyle
+		bodyStyle := golemBodyStyle
+		headerLabel := "GOLEM"
+
+		if msg.IsError {
+			headerStyle = headerStyle.Copy().Background(lipgloss.Color("#FF0000"))
+			bodyStyle = bodyStyle.Copy().BorderForeground(lipgloss.Color("#FF0000"))
+			headerLabel = "ERROR"
+		}
+
+		header := headerStyle.Render(headerLabel)
+
+		var contentBuilder strings.Builder
+		contentBuilder.WriteString(header + "\n")
+
+		// 渲染工具执行日志
+		if len(msg.Tools) > 0 {
+			contentBuilder.WriteString("\n")
+			for _, t := range msg.Tools {
+				contentBuilder.WriteString(toolLogStyle.Render(fmt.Sprintf("➢ %s", t.Name)))
+
+				if t.Err != nil {
+					errStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("#FF0000"))
+					contentBuilder.WriteString(errStyle.Render(" ✖ "))
+					contentBuilder.WriteString(errStyle.Italic(true).Render(fmt.Sprintf("%v", t.Err)))
+				} else {
+					res := t.Result
+					res = truncate(res, 200)
+					successStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("#2E8B57"))
+					contentBuilder.WriteString(successStyle.Render(" ✔ "))
+					contentBuilder.WriteString(successStyle.Italic(true).Render(res))
+				}
+				contentBuilder.WriteString("\n")
+			}
+		}
+
+		// 渲染思考过程
+		if msg.Thinking != "" {
+			if len(msg.Tools) > 0 {
+				contentBuilder.WriteString("\n")
+			}
+
+			thinkStyle := m.thinkingStyle.Width(contentWidth - 2)
+			thinkTxt := "◉ Thinking:\n" + msg.Thinking
+			contentBuilder.WriteString(thinkStyle.Render(thinkTxt) + "\n")
+
+			// 添加分隔线
+			sep := lipgloss.NewStyle().
+				Foreground(lipgloss.Color("240")).
+				Render(strings.Repeat("─", contentWidth-2))
+			contentBuilder.WriteString(sep + "\n")
+		} else if len(msg.Tools) > 0 {
+			contentBuilder.WriteString("\n")
+		}
+
+		// 渲染主回答内容
+		contentBuilder.WriteString(msg.Content)
+
+		finalContent := strings.TrimRight(contentBuilder.String(), "\n")
+		body := bodyStyle.
+			Width(contentWidth).
+			Render(finalContent)
+
+		result = fmt.Sprintf("\n%s", body)
+	}
+
+	msg.renderedContent = result
+	msg.renderedWidth = m.width
+	msg.lastRenderedContent = msg.Content
+	msg.lastRenderedThinking = msg.Thinking
+	msg.lastRenderedToolsLen = len(msg.Tools)
+	return result
+}
+
 func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
+	if key, ok := msg.(tea.KeyMsg); ok && key.Type == tea.KeyCtrlL {
+		// 只清屏幕上的历史，不重置 agent 会话。进行中的回复仍挂在 currentHelper 上。
+		m.messages = []ChatMessage{welcomeMessage()}
+		if !m.thinking {
+			m.currentHelper = nil
+			m.currentTool = ""
+		}
+		m.viewport.SetContent(m.renderAll())
+		m.viewport.GotoBottom()
+		return m, nil
+	}
+
 	var (
 		tiCmd tea.Cmd
 		vpCmd tea.Cmd
+		spCmd tea.Cmd
 	)
 
 	m.textarea, tiCmd = m.textarea.Update(msg)
+
+	if mouseMsg, ok := msg.(tea.MouseMsg); ok {
+		switch mouseMsg.Type {
+		case tea.MouseWheelUp:
+			m.viewport.LineUp(3)
+			return m, nil
+		case tea.MouseWheelDown:
+			m.viewport.LineDown(3)
+			return m, nil
+		}
+	}
+
 	m.viewport, vpCmd = m.viewport.Update(msg)
+
+	textareaHeight := 3
+	processingHeight := 0
+	if m.thinking {
+		processingHeight = 1
+	}
+	helpHeight := 1
 
 	switch msg := msg.(type) {
 	case tea.WindowSizeMsg:
-		m.viewport.Width = msg.Width
-		m.textarea.SetWidth(msg.Width)
-		// Height - textarea height - 1 line for separation - 1 line for spinner - 1 line for help
-		m.viewport.Height = msg.Height - m.textarea.Height() - 3
-		m.textarea.SetWidth(msg.Width)
+		m.width = msg.Width
+		availableWidth := msg.Width - 4
+		if availableWidth < 20 {
+			availableWidth = 20
+		}
 
-		// Update renderer width
+		m.textarea.SetWidth(availableWidth)
+		m.viewport.Width = availableWidth
+
+		availableHeight := msg.Height - textareaHeight - processingHeight - helpHeight
+		if availableHeight < 5 {
+			availableHeight = 5
+		}
+		m.viewport.Height = availableHeight
+
 		if m.renderer != nil {
 			newRenderer, err := glamour.NewTermRenderer(
 				glamour.WithStandardStyle("dark"),
-				glamour.WithWordWrap(msg.Width),
+				glamour.WithWordWrap(availableWidth-6),
 			)
 			if err == nil {
 				m.renderer = newRenderer
 			}
 		}
 
-	case spinner.TickMsg:
-		if m.loading {
-			var cmd tea.Cmd
-			m.spinner, cmd = m.spinner.Update(msg)
-			return m, cmd
-		}
+		m.viewport.SetContent(m.renderAll())
 
 	case tea.KeyMsg:
 		switch msg.Type {
 		case tea.KeyCtrlC, tea.KeyEsc:
 			return m, tea.Quit
-		case tea.KeyCtrlL:
-			m.history.Reset()
-			m.history.WriteString(`Welcome to Golem Chat!
-Type a message and press Enter to send.`)
-			m.viewport.SetContent(m.history.String())
-			return m, nil
 		case tea.KeyEnter:
 			if m.textarea.Value() == "" {
 				return m, nil
@@ -215,11 +452,42 @@ Type a message and press Enter to send.`)
 			input := m.textarea.Value()
 			m.textarea.Reset()
 
-			m.history.WriteString("\n\n" + m.senderStyle.Render("You: ") + input)
-			m.viewport.SetContent(m.history.String())
+			// 处理内置斜杠命令：/new
+			if strings.TrimSpace(input) == "/new" {
+				m.messages = nil
+				m.currentHelper = &ChatMessage{Role: "golem"}
+				m.thinking = true
+				m.viewport.SetContent(m.renderAll())
+				m.viewport.GotoBottom()
+				if m.viewport.Height > 5 {
+					m.viewport.Height -= 1
+				}
+				return m, tea.Batch(
+					m.spinner.Tick,
+					func() tea.Msg {
+						resp, err := m.loop.ProcessDirect(m.ctx, input)
+						if err != nil {
+							return errMsg(err)
+						}
+						return responseMsg(resp)
+					},
+				)
+			}
+
+			// 添加用户消息
+			m.messages = append(m.messages, ChatMessage{Role: "user", Content: input})
+
+			// 初始化 Golem 助手生成状态
+			m.currentHelper = &ChatMessage{Role: "golem"}
+			m.thinking = true
+
+			m.viewport.SetContent(m.renderAll())
 			m.viewport.GotoBottom()
 
-			m.loading = true
+			if m.viewport.Height > 5 {
+				m.viewport.Height -= 1
+			}
+
 			return m, tea.Batch(
 				m.spinner.Tick,
 				func() tea.Msg {
@@ -230,69 +498,149 @@ Type a message and press Enter to send.`)
 					return responseMsg(resp)
 				},
 			)
+
 		}
 
 	case responseMsg:
-		m.loading = false
-		content := string(msg)
-		var viewContent string
-		thinkRendered, mainRendered, hasThink := renderResponseParts(content, m.renderer)
-		if hasThink {
-			thinkRendered = indentLines(thinkRendered, "  ")
-			viewContent = "\n\n" + m.thinkingStyle.Render("💭 Thinking:\n"+thinkRendered) +
-				"\n\n" + m.aiStyle.Render("Golem: ") + mainRendered
-		} else {
-			viewContent = "\n\n" + m.aiStyle.Render("Golem: ") + mainRendered
+		m.currentTool = ""
+		if m.thinking {
+			m.viewport.Height += 1
+		}
+		m.thinking = false
+
+		if m.currentHelper != nil {
+			content := string(msg)
+			think, main, hasThink := renderResponseParts(content, m.renderer)
+
+			if hasThink {
+				m.currentHelper.Thinking = think
+			}
+			m.currentHelper.Content = main
+
+			m.messages = append(m.messages, *m.currentHelper)
+			m.currentHelper = nil
 		}
 
-		m.history.WriteString(viewContent)
-		m.viewport.SetContent(m.history.String())
+		m.viewport.SetContent(m.renderAll())
 		m.viewport.GotoBottom()
 
 	case toolStartMsg:
-		content := fmt.Sprintf("🛠️  Executing tool: %s\n", msg.name)
-		m.history.WriteString("\n" + m.toolStyle.Render(content))
-		m.viewport.SetContent(m.history.String())
+		m.currentTool = msg.name
+		if m.currentHelper == nil {
+			m.currentHelper = &ChatMessage{Role: "golem"}
+		}
+		m.viewport.SetContent(m.renderAll())
 		m.viewport.GotoBottom()
 
 	case toolFinishMsg:
-		var content string
-		if msg.err != nil {
-			content = fmt.Sprintf("❌ Tool failed: %v", msg.err)
-		} else {
-			// Truncate result if too long
-			result := msg.result
-			if len(result) > 100 {
-				result = result[:100] + "..."
-			}
-			content = fmt.Sprintf("✅ Tool finished: %s", result)
+		m.currentTool = ""
+		if m.currentHelper == nil {
+			m.currentHelper = &ChatMessage{Role: "golem"}
 		}
-		m.history.WriteString("\n" + m.toolStyle.Render(content))
-		m.viewport.SetContent(m.history.String())
+		m.currentHelper.Tools = append(m.currentHelper.Tools, ToolLog{
+			Name:   msg.name,
+			Result: msg.result,
+			Err:    msg.err,
+		})
+
+		m.viewport.SetContent(m.renderAll())
 		m.viewport.GotoBottom()
 
 	case errMsg:
-		m.loading = false
+		if m.thinking {
+			m.viewport.Height += 1
+		}
+		m.thinking = false
+
+		if m.currentHelper != nil {
+			m.currentHelper.Content = fmt.Sprintf("Error: %v", msg)
+			m.currentHelper.IsError = true
+			m.messages = append(m.messages, *m.currentHelper)
+			m.currentHelper = nil
+		} else {
+			m.messages = append(m.messages, ChatMessage{Role: "golem", Content: fmt.Sprintf("System Error: %v", msg), IsError: true})
+		}
+
+		m.viewport.SetContent(m.renderAll())
+		m.viewport.GotoBottom()
+
 		m.err = msg
 		return m, nil
 	}
 
-	return m, tea.Batch(tiCmd, vpCmd)
+	if m.thinking {
+		m.spinner, spCmd = m.spinner.Update(msg)
+	}
+
+	return m, tea.Batch(tiCmd, vpCmd, spCmd)
 }
 
 func (m model) View() string {
-	var spinnerView string
-	if m.loading {
-		spinnerView = m.spinner.View() + " Thinking..."
+	var processingView string
+	if m.thinking {
+		padding := strings.Repeat(" ", 2)
+		label := "Thinking..."
+		if m.currentTool != "" {
+			label = fmt.Sprintf("Running tool: %s...", m.currentTool)
+		}
+		processingView = fmt.Sprintf("%s%s %s", padding, m.spinner.View(), label)
+		processingView = m.thinkingStyle.Render(processingView)
 	}
-	helpView := m.helpStyle.Render("  Esc: quit • Ctrl+L: clear • Enter: send")
-	return fmt.Sprintf(
-		"%s\n%s\n%s\n%s",
+
+	separator := descStyle.Render(" • ")
+	helpView := lipgloss.JoinHorizontal(
+		lipgloss.Top,
+		keyStyle.Render("Enter"),
+		descStyle.Render("Send"),
+		separator,
+		keyStyle.Render("/new"),
+		descStyle.Render("Reset"),
+		separator,
+		keyStyle.Render("Ctrl+L"),
+		descStyle.Render("Clear"),
+		separator,
+		keyStyle.Render("PgUp/Dn"),
+		descStyle.Render("Scroll"),
+		separator,
+		keyStyle.Render("Esc/Ctrl+C"),
+		descStyle.Render("Quit"),
+	)
+
+	charCount := fmt.Sprintf("%d/%d", m.textarea.Length(), m.textarea.CharLimit)
+	charCountView := descStyle.Render(charCount)
+
+	var rightElements string
+	if !m.viewport.AtBottom() {
+		scrollIndicator := keyStyle.Copy().Background(lipgloss.Color("172")).Render("↓ Scrolled Up")
+		// Adding a separator between indicator and character count
+		rightElements = lipgloss.JoinHorizontal(lipgloss.Top, scrollIndicator, separator, charCountView)
+	} else {
+		rightElements = charCountView
+	}
+
+	usedWidth := lipgloss.Width(helpView)
+	rightElementsWidth := lipgloss.Width(rightElements)
+
+	// Subtract the PaddingRight added by helpStyle (assumed to be 2) and leave some margin
+	spacerWidth := m.width - usedWidth - rightElementsWidth - 2
+	if spacerWidth > 0 {
+		spacer := strings.Repeat(" ", spacerWidth)
+		helpView = lipgloss.JoinHorizontal(lipgloss.Top, helpView, spacer, rightElements)
+	} else {
+		helpView = lipgloss.JoinHorizontal(lipgloss.Top, helpView, " ", rightElements)
+	}
+
+	helpView = helpStyle.Render(helpView)
+
+	content := lipgloss.JoinVertical(
+		lipgloss.Left,
 		m.viewport.View(),
-		spinnerView,
+		processingView,
 		m.textarea.View(),
 		helpView,
 	)
+
+	return content
 }
 
 func runChat(cmd *cobra.Command, args []string) error {
@@ -302,8 +650,9 @@ func runChat(cmd *cobra.Command, args []string) error {
 		return fmt.Errorf("failed to load config: %w", err)
 	}
 
-	// Disable logging for TUI
-	slog.SetDefault(slog.New(slog.NewTextHandler(io.Discard, nil)))
+	if err := configureLogger(cfg, logLevelOverride, true); err != nil {
+		return fmt.Errorf("failed to configure logger: %w", err)
+	}
 
 	modelProvider, err := provider.NewChatModel(ctx, cfg)
 	if err != nil {
@@ -319,6 +668,14 @@ func runChat(cmd *cobra.Command, args []string) error {
 	if err := loop.RegisterDefaultTools(cfg); err != nil {
 		return fmt.Errorf("failed to register tools: %w", err)
 	}
+	workspacePath, err := cfg.WorkspacePathChecked()
+	if err != nil {
+		return fmt.Errorf("invalid workspace: %w", err)
+	}
+	runtimeMetrics := metrics.NewRuntimeMetrics(workspacePath)
+	defer runtimeMetrics.Close()
+	loop.SetRuntimeMetrics(runtimeMetrics)
+	logAndAuditRuntimePolicyStartup(ctx, loop, cfg)
 
 	if len(args) > 0 {
 		message := strings.Join(args, " ")
@@ -332,7 +689,7 @@ func runChat(cmd *cobra.Command, args []string) error {
 
 	p := tea.NewProgram(initialModel(ctx, loop), tea.WithAltScreen())
 
-	// Set callbacks
+	// 设置回调，将工具执行状态同步到 TUI
 	loop.OnToolStart = func(name, args string) {
 		p.Send(toolStartMsg{name: name, args: args})
 	}
