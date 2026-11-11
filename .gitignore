@@ -1,4 +1,11 @@
 .worktrees/
-golem.exe
-golem
+/golem.exe
+/golem
 docs/plans
+docs/analysis
+.vscode
+.claude
+CLAUDE.md
+node_modules/
+web/node_modules/
+web/dist/

@@ -1,75 +1,305 @@
+// Package agent 实现核心 AI 助手逻辑，包括消息循环、工具调用及上下文管理。
 package agent
 
 import (
 	"context"
+	"encoding/json"
+	"fmt"
 	"log/slog"
+	"path/filepath"
+	"strings"
+	"sync"
+	"time"
 
 	"github.com/MEKXH/golem/internal/bus"
+	"github.com/MEKXH/golem/internal/command"
 	"github.com/MEKXH/golem/internal/config"
+	"github.com/MEKXH/golem/internal/geopipeline"
+	"github.com/MEKXH/golem/internal/mcp"
+	"github.com/MEKXH/golem/internal/metrics"
 	"github.com/MEKXH/golem/internal/session"
+	"github.com/MEKXH/golem/internal/skills"
 	"github.com/MEKXH/golem/internal/tools"
 	"github.com/cloudwego/eino/components/model"
 	"github.com/cloudwego/eino/components/tool"
 	"github.com/cloudwego/eino/schema"
 )
 
-// Loop is the main agent processing loop
+// Loop 负责管理 Agent 的主处理循环，包括消息处理、模型生成及工具执行。
 type Loop struct {
-	bus           *bus.MessageBus
-	model         model.ChatModel
-	tools         *tools.Registry
-	sessions      *session.Manager
-	context       *ContextBuilder
-	maxIterations int
-	workspacePath string
+	bus           *bus.MessageBus         // 消息总线，用于收发通道消息
+	model         model.ChatModel         // 绑定的聊天模型实现
+	tools         *tools.Registry         // 工具注册表，管理所有可用工具
+	commands      *command.Registry       // 命令注册表，管理斜杠命令
+	mcpManager    *mcp.Manager            // MCP（Model Context Protocol）连接管理器
+	runtimeGuard  *runtimeGuard           // 运行时安全防护，用于权限控制
+	subagents     *SubagentManager        // 子 Agent 管理器，支持任务委派
+	sessions      *session.Manager        // 会话管理器，维护用户历史记录
+	context       *ContextBuilder         // 上下文构建器，准备模型所需的 Prompt
+	config        *config.Config          // 项目全局配置
+	maxIterations int                     // 单条消息允许的最大工具调用迭代次数
+	workspacePath string                  // 工作空间根目录路径
+	now           func() time.Time        // 获取当前时间的函数（方便测试）
+	runtimeMetric *metrics.RuntimeMetrics // 运行时指标收集器
 
-	OnToolStart  func(name, args string)
+	// OnToolStart 工具开始执行时的回调函数
+	OnToolStart func(name, args string)
+	// OnToolFinish 工具执行完成后的回调函数
 	OnToolFinish func(name, result string, err error)
+
+	// activityRecorder 记录最近活跃的通道与聊天 ID 的回调
+	activityRecorder func(channel, chatID string)
 }
 
-// NewLoop creates a new agent loop
+// NewLoop 根据配置、消息总线和聊天模型创建一个新的 Loop 实例。
 func NewLoop(cfg *config.Config, msgBus *bus.MessageBus, chatModel model.ChatModel) (*Loop, error) {
 	workspacePath, err := cfg.WorkspacePathChecked()
 	if err != nil {
 		return nil, err
 	}
+	cmdRegistry := command.NewRegistry()
+	cmdRegistry.Register(&command.NewSessionCommand{})
+	cmdRegistry.Register(&command.HelpCommand{})
+	cmdRegistry.Register(&command.VersionCommand{})
+	cmdRegistry.Register(&command.StatusCommand{})
+	cmdRegistry.Register(&command.CronCommand{})
+	cmdRegistry.Register(&command.SkillsCommand{})
+	cmdRegistry.Register(&command.MemoryCommand{})
+
 	return &Loop{
 		bus:           msgBus,
 		model:         chatModel,
 		tools:         tools.NewRegistry(),
+		commands:      cmdRegistry,
 		sessions:      session.NewManager(workspacePath),
 		context:       NewContextBuilder(workspacePath),
+		config:        cfg,
 		maxIterations: cfg.Agents.Defaults.MaxToolIterations,
 		workspacePath: workspacePath,
+		now:           time.Now,
 	}, nil
 }
 
-// RegisterDefaultTools registers all built-in tools
+// Tools 返回工具注册表。
+func (l *Loop) Tools() *tools.Registry {
+	return l.tools
+}
+
+// SetActivityRecorder 附加一个回调函数，用于跟踪最新活跃的通道/聊天。
+func (l *Loop) SetActivityRecorder(recorder func(channel, chatID string)) {
+	l.activityRecorder = recorder
+}
+
+// SetRuntimeMetrics 附加一个运行时指标记录器，用于工具执行统计。
+func (l *Loop) SetRuntimeMetrics(recorder *metrics.RuntimeMetrics) {
+	l.runtimeMetric = recorder
+	if l.context != nil {
+		l.context.SetRuntimeMetrics(recorder)
+	}
+}
+
+// RegisterDefaultTools 注册所有内置工具
 func (l *Loop) RegisterDefaultTools(cfg *config.Config) error {
-	toolFns := []func() (interface{}, error){
-		func() (interface{}, error) { return tools.NewReadFileTool(l.workspacePath) },
-		func() (interface{}, error) { return tools.NewWriteFileTool(l.workspacePath) },
-		func() (interface{}, error) { return tools.NewListDirTool(l.workspacePath) },
-		func() (interface{}, error) {
+	toolFns := []func() (tool.InvokableTool, error){
+		func() (tool.InvokableTool, error) { return tools.NewReadFileTool(l.workspacePath) },
+		func() (tool.InvokableTool, error) { return tools.NewWriteFileTool(l.workspacePath) },
+		func() (tool.InvokableTool, error) { return tools.NewEditFileTool(l.workspacePath) },
+		func() (tool.InvokableTool, error) { return tools.NewAppendFileTool(l.workspacePath) },
+		func() (tool.InvokableTool, error) { return tools.NewListDirTool(l.workspacePath) },
+		func() (tool.InvokableTool, error) { return tools.NewReadMemoryTool(l.workspacePath) },
+		func() (tool.InvokableTool, error) { return tools.NewWriteMemoryTool(l.workspacePath) },
+		func() (tool.InvokableTool, error) { return tools.NewAppendDiaryTool(l.workspacePath) },
+		func() (tool.InvokableTool, error) {
 			return tools.NewExecTool(
 				cfg.Tools.Exec.Timeout,
 				cfg.Tools.Exec.RestrictToWorkspace,
 				l.workspacePath,
 			)
 		},
+		func() (tool.InvokableTool, error) { return tools.NewWebFetchTool() },
+		func() (tool.InvokableTool, error) {
+			return tools.NewWebSearchTool(cfg.Tools.Web.Search.APIKey, cfg.Tools.Web.Search.MaxResults)
+		},
 	}
 
+	registered := make([]string, 0, len(toolFns))
 	for _, fn := range toolFns {
 		t, err := fn()
 		if err != nil {
 			return err
 		}
-		if invokable, ok := t.(tool.InvokableTool); ok {
-			if err := l.tools.Register(invokable); err != nil {
+		if err := l.tools.Register(t); err != nil {
+			return err
+		}
+		info, err := t.Info(context.Background())
+		if err == nil && info != nil && info.Name != "" {
+			registered = append(registered, info.Name)
+		}
+	}
+
+	msgTool, err := tools.NewMessageTool(l.bus)
+	if err != nil {
+		return err
+	}
+	if err := l.tools.Register(msgTool); err != nil {
+		return err
+	}
+	if info, err := msgTool.Info(context.Background()); err == nil && info != nil && info.Name != "" {
+		registered = append(registered, info.Name)
+	}
+
+	l.subagents = NewSubagentManagerWithOptions(l.bus, l, SubagentManagerOptions{
+		Timeout:        time.Duration(cfg.Agents.Subagent.TimeoutSeconds) * time.Second,
+		Retry:          cfg.Agents.Subagent.Retry,
+		MaxConcurrency: cfg.Agents.Subagent.MaxConcurrency,
+	})
+	spawnTool, err := tools.NewSpawnTool(l.subagents)
+	if err != nil {
+		return err
+	}
+	if err := l.tools.Register(spawnTool); err != nil {
+		return err
+	}
+	if info, err := spawnTool.Info(context.Background()); err == nil && info != nil && info.Name != "" {
+		registered = append(registered, info.Name)
+	}
+
+	subagentTool, err := tools.NewSubagentTool(l.subagents)
+	if err != nil {
+		return err
+	}
+	if err := l.tools.Register(subagentTool); err != nil {
+		return err
+	}
+	if info, err := subagentTool.Info(context.Background()); err == nil && info != nil && info.Name != "" {
+		registered = append(registered, info.Name)
+	}
+
+	workflowTool, err := tools.NewWorkflowTool(l.subagents)
+	if err != nil {
+		return err
+	}
+	if err := l.tools.Register(workflowTool); err != nil {
+		return err
+	}
+	if info, err := workflowTool.Info(context.Background()); err == nil && info != nil && info.Name != "" {
+		registered = append(registered, info.Name)
+	}
+
+	if cfg.Tools.Geo.Enabled {
+		gdalBinDir := cfg.Tools.Geo.GdalBinDir
+		geoTimeout := cfg.Tools.Geo.TimeoutSeconds
+		geoRestrict := cfg.Tools.Geo.RestrictToWorkspace
+		postGISDSN := strings.TrimSpace(cfg.Tools.Geo.PostGISDSN)
+		geoToolFns := []func() (tool.InvokableTool, error){
+			func() (tool.InvokableTool, error) {
+				return tools.NewGeoInfoTool(gdalBinDir, l.workspacePath, geoRestrict)
+			},
+			func() (tool.InvokableTool, error) {
+				return tools.NewGeoProcessTool(gdalBinDir, l.workspacePath, geoTimeout, geoRestrict)
+			},
+			func() (tool.InvokableTool, error) {
+				return tools.NewGeoCrsDetectTool(gdalBinDir, l.workspacePath, geoRestrict)
+			},
+			func() (tool.InvokableTool, error) {
+				return tools.NewGeoFormatConvertTool(gdalBinDir, l.workspacePath, geoTimeout, geoRestrict)
+			},
+			func() (tool.InvokableTool, error) {
+				return tools.NewGeoDataCatalogTool(l.workspacePath, geoRestrict, geoTimeout)
+			},
+			func() (tool.InvokableTool, error) {
+				return tools.NewGeoSQLCodebookTool(l.workspacePath)
+			},
+		}
+		for _, fn := range geoToolFns {
+			t, err := fn()
+			if err != nil {
 				return err
+			}
+			if err := l.tools.Register(t); err != nil {
+				return err
+			}
+			if info, err := t.Info(context.Background()); err == nil && info != nil && info.Name != "" {
+				registered = append(registered, info.Name)
+			}
+		}
+		fabricatedTools, err := tools.LoadGeoFabricatedTools(l.workspacePath)
+		if err != nil {
+			return err
+		}
+		for _, fabricatedTool := range fabricatedTools {
+			if err := l.tools.Register(fabricatedTool); err != nil {
+				return err
+			}
+			if info, err := fabricatedTool.Info(context.Background()); err == nil && info != nil && info.Name != "" {
+				registered = append(registered, info.Name)
+			}
+		}
+		if postGISDSN != "" {
+			spatialQueryTool, err := tools.NewGeoSpatialQueryTool(
+				postGISDSN,
+				cfg.Tools.Geo.QueryTimeoutSeconds,
+				cfg.Tools.Geo.MaxRows,
+				cfg.Tools.Geo.ReadOnly,
+			)
+			if err != nil {
+				return err
+			}
+			if err := l.tools.Register(spatialQueryTool); err != nil {
+				return err
+			}
+			if info, err := spatialQueryTool.Info(context.Background()); err == nil && info != nil && info.Name != "" {
+				registered = append(registered, info.Name)
+			}
+		} else {
+			slog.Info("geo_spatial_query not registered", "reason", "tools.geo.postgis_dsn is empty")
+		}
+		slog.Info(
+			"geo tools registered",
+			"gdal_bin_dir", gdalBinDir,
+			"restrict_to_workspace", geoRestrict,
+			"spatial_query_enabled", postGISDSN != "",
+		)
+	}
+
+	if len(cfg.MCP.Servers) > 0 {
+		mgr := mcp.NewManager(cfg.MCP.Servers, mcp.DefaultConnectors())
+		if err := mgr.Connect(context.Background()); err != nil {
+			return err
+		}
+		if err := mgr.RegisterTools(l.tools); err != nil {
+			return err
+		}
+		l.mcpManager = mgr
+
+		for _, status := range mgr.Statuses() {
+			if status.Degraded {
+				slog.Warn("mcp server degraded",
+					"server", status.Name,
+					"transport", status.Transport,
+					"error", status.Message,
+				)
+				continue
+			}
+			slog.Info("mcp server connected",
+				"server", status.Name,
+				"transport", status.Transport,
+				"tools", status.ToolCount,
+			)
+		}
+
+		for _, name := range l.tools.Names() {
+			if strings.HasPrefix(name, "mcp.") {
+				registered = append(registered, name)
 			}
 		}
 	}
+
+	if err := l.configureRuntimeGuard(cfg); err != nil {
+		return err
+	}
+
+	slog.Info("registered tools", "count", len(registered), "tools", registered)
 	return nil
 }
 
@@ -89,7 +319,7 @@ func (l *Loop) bindTools(ctx context.Context) error {
 	return nil
 }
 
-// Run starts the agent loop
+// Run 启动 Agent 循环
 func (l *Loop) Run(ctx context.Context) error {
 	if err := l.bindTools(ctx); err != nil {
 		return err
@@ -101,14 +331,29 @@ func (l *Loop) Run(ctx context.Context) error {
 		select {
 		case <-ctx.Done():
 			return ctx.Err()
-		case msg := <-l.bus.Inbound():
+		case msg, ok := <-l.bus.Inbound():
+			if !ok {
+				return fmt.Errorf("inbound channel closed")
+			}
+			if msg == nil {
+				slog.Warn("received nil inbound message")
+				continue
+			}
+			if strings.TrimSpace(msg.RequestID) == "" {
+				msg.RequestID = bus.NewRequestID()
+			}
+			if msg.Channel == bus.SystemChannel {
+				l.processSystemMessage(msg)
+				continue
+			}
 			resp, err := l.processMessage(ctx, msg)
 			if err != nil {
-				slog.Error("process message failed", "error", err)
+				slog.Error("process message failed", "request_id", msg.RequestID, "channel", msg.Channel, "chat_id", msg.ChatID, "session_key", msg.SessionKey(), "error", err)
 				l.bus.PublishOutbound(&bus.OutboundMessage{
-					Channel: msg.Channel,
-					ChatID:  msg.ChatID,
-					Content: "Error: " + err.Error(),
+					Channel:   msg.Channel,
+					ChatID:    msg.ChatID,
+					Content:   "Error: " + err.Error(),
+					RequestID: msg.RequestID,
 				})
 				continue
 			}
@@ -119,14 +364,89 @@ func (l *Loop) Run(ctx context.Context) error {
 	}
 }
 
+func (l *Loop) processSystemMessage(msg *bus.InboundMessage) {
+	if msg == nil {
+		return
+	}
+
+	msgType := strings.TrimSpace(fmt.Sprint(msg.Metadata[bus.SystemMetaType]))
+	if msgType != bus.SystemTypeSubagentResult {
+		slog.Info("ignored system message", "request_id", msg.RequestID, "type", msgType)
+		return
+	}
+
+	originChannel := strings.TrimSpace(fmt.Sprint(msg.Metadata[bus.SystemMetaOriginChannel]))
+	if originChannel == "" {
+		originChannel = "cli"
+	}
+	originChatID := strings.TrimSpace(fmt.Sprint(msg.Metadata[bus.SystemMetaOriginChatID]))
+	if originChatID == "" {
+		originChatID = "direct"
+	}
+
+	label := strings.TrimSpace(fmt.Sprint(msg.Metadata[bus.SystemMetaTaskLabel]))
+	content := strings.TrimSpace(msg.Content)
+	if label != "" {
+		content = fmt.Sprintf("Subagent '%s' completed.\n\n%s", label, content)
+	}
+	if content == "" {
+		content = "Subagent completed."
+	}
+
+	l.bus.PublishOutbound(&bus.OutboundMessage{
+		Channel:   originChannel,
+		ChatID:    originChatID,
+		Content:   content,
+		RequestID: msg.RequestID,
+		Metadata: map[string]any{
+			bus.SystemMetaType:   bus.SystemTypeSubagentResult,
+			bus.SystemMetaTaskID: msg.Metadata[bus.SystemMetaTaskID],
+			bus.SystemMetaStatus: msg.Metadata[bus.SystemMetaStatus],
+		},
+	})
+}
+
 func (l *Loop) processMessage(ctx context.Context, msg *bus.InboundMessage) (*bus.OutboundMessage, error) {
-	slog.Info("processing message", "channel", msg.Channel, "sender", msg.SenderID)
+	slog.Info("processing message", "request_id", msg.RequestID, "channel", msg.Channel, "chat_id", msg.ChatID, "sender", msg.SenderID, "session_key", msg.SessionKey())
+	if l.activityRecorder != nil {
+		l.activityRecorder(msg.Channel, msg.ChatID)
+	}
+
+	// Slash command interception — execute directly, skip LLM.
+	if cmd, args, ok := l.commands.Lookup(msg.Content); ok {
+		result := cmd.Execute(ctx, args, command.Env{
+			Channel:       msg.Channel,
+			ChatID:        msg.ChatID,
+			SenderID:      msg.SenderID,
+			SessionKey:    msg.SessionKey(),
+			Sessions:      l.sessions,
+			WorkspacePath: l.workspacePath,
+			Config:        l.config,
+			Metrics:       l.runtimeMetric,
+			ListCommands:  l.commands.List,
+		})
+		return &bus.OutboundMessage{
+			Channel:   msg.Channel,
+			ChatID:    msg.ChatID,
+			Content:   result.Content,
+			RequestID: msg.RequestID,
+		}, nil
+	}
 
 	sess := l.sessions.GetOrCreate(msg.SessionKey())
+
+	selectedSkillName := ""
+	selectedSkills := skills.SelectSkillsForQuery(skills.NewLoader(l.workspacePath).ListSkills(), msg.Content)
+	if len(selectedSkills) == 1 {
+		selectedSkillName = selectedSkills[0].Name
+	}
 
 	messages := l.context.BuildMessages(sess.GetHistory(50), msg.Content, msg.Media)
 
 	var finalContent string
+	learnedGeoSteps := make([]geopipeline.Step, 0)
+	hasGeoActivity := false
+	hasGeoFailure := false
 
 	for i := 0; i < l.maxIterations; i++ {
 		if l.model == nil {
@@ -139,62 +459,187 @@ func (l *Loop) processMessage(ctx context.Context, msg *bus.InboundMessage) (*bu
 			return nil, err
 		}
 
-		if len(resp.ToolCalls) == 0 {
+		// Always capture the latest content from the LLM response,
+		// even when tool calls are present.
+		if resp.Content != "" {
 			finalContent = resp.Content
+		}
+
+		if len(resp.ToolCalls) == 0 {
 			break
 		}
 
 		messages = append(messages, resp)
 
-		for _, tc := range resp.ToolCalls {
-			slog.Debug("executing tool", "name", tc.Function.Name)
-
-			if l.OnToolStart != nil {
-				l.OnToolStart(tc.Function.Name, tc.Function.Arguments)
-			}
-
-			result, err := l.tools.Execute(ctx, tc.Function.Name, tc.Function.Arguments)
-			if err != nil {
-				result = "Error: " + err.Error()
-			}
-
-			if l.OnToolFinish != nil {
-				l.OnToolFinish(tc.Function.Name, result, err)
-			}
-
-			messages = append(messages, &schema.Message{
-				Role:       schema.Tool,
-				Content:    result,
-				ToolCallID: tc.ID,
-			})
+		type toolResult struct {
+			index   int
+			msg     *schema.Message
+			step    geopipeline.Step
+			success bool
 		}
+
+		resultChan := make(chan toolResult, len(resp.ToolCalls))
+		var wg sync.WaitGroup
+
+		for i, tc := range resp.ToolCalls {
+			wg.Add(1)
+			go func(i int, tc schema.ToolCall) {
+				defer wg.Done()
+				toolStart := time.Now()
+				slog.Debug("executing tool", "request_id", msg.RequestID, "name", tc.Function.Name)
+
+				if l.OnToolStart != nil {
+					l.OnToolStart(tc.Function.Name, tc.Function.Arguments)
+				}
+
+				toolCtx := tools.WithInvocationContext(ctx, tools.InvocationContext{
+					Channel:   msg.Channel,
+					ChatID:    msg.ChatID,
+					SenderID:  msg.SenderID,
+					RequestID: msg.RequestID,
+					SessionID: msg.SessionKey(),
+				})
+
+				result, err := l.tools.Execute(toolCtx, tc.Function.Name, tc.Function.Arguments)
+				if err != nil {
+					result = "Error: " + err.Error()
+				}
+
+				if err == nil && (tc.Function.Name == "write_file" || tc.Function.Name == "edit_file" || tc.Function.Name == "append_file") {
+					var fileArg struct {
+						Path string `json:"path"`
+					}
+					// Best effort parsing; if fails, we pass empty string which forces invalidation
+					_ = json.Unmarshal([]byte(tc.Function.Arguments), &fileArg)
+					l.context.InvalidateCache(fileArg.Path)
+				}
+
+				l.auditToolExecution(toolCtx, tc.Function.Name, result, err)
+				toolDuration := time.Since(toolStart)
+				logAttrs := []any{
+					"request_id", msg.RequestID,
+					"channel", msg.Channel,
+					"chat_id", msg.ChatID,
+					"tool", tc.Function.Name,
+					"tool_duration", toolDuration.String(),
+					"duration_ms", toolDuration.Milliseconds(),
+					"success", err == nil,
+				}
+				if l.runtimeMetric != nil {
+					snapshot, metricErr := l.runtimeMetric.RecordToolExecution(toolDuration, result, err)
+					if metricErr != nil {
+						slog.Warn("record runtime metrics failed", "scope", "tool", "error", metricErr)
+					}
+					logAttrs = append(logAttrs,
+						"tool_total", snapshot.Tool.Total,
+						"tool_error_ratio", snapshot.Tool.ErrorRatio(),
+						"tool_timeout_ratio", snapshot.Tool.TimeoutRatio(),
+						"tool_latency_p95_proxy_ms", snapshot.Tool.P95ProxyLatencyMs,
+					)
+				}
+				slog.Info("tool execution finished", logAttrs...)
+
+				if l.OnToolFinish != nil {
+					l.OnToolFinish(tc.Function.Name, result, err)
+				}
+
+				resultChan <- toolResult{
+					index: i,
+					msg: &schema.Message{
+						Role:       schema.Tool,
+						Content:    result,
+						ToolCallID: tc.ID,
+					},
+					step: geopipeline.Step{
+						Tool:     tc.Function.Name,
+						ArgsJSON: tc.Function.Arguments,
+					},
+					success: err == nil,
+				}
+			}(i, tc)
+		}
+
+		wg.Wait()
+		close(resultChan)
+
+		// Collect results and sort them to maintain original order
+		results := make([]*schema.Message, len(resp.ToolCalls))
+		for res := range resultChan {
+			results[res.index] = res.msg
+			if strings.HasPrefix(res.step.Tool, "geo_") {
+				hasGeoActivity = true
+				if res.success {
+					learnedGeoSteps = append(learnedGeoSteps, res.step)
+				} else {
+					hasGeoFailure = true
+				}
+			}
+		}
+
+		messages = append(messages, results...)
+	}
+
+	if len(learnedGeoSteps) > 0 && !hasGeoFailure {
+		recorder := geopipeline.NewRecorder(l.workspacePath)
+		if err := recorder.Save(msg.Content, learnedGeoSteps); err != nil {
+			slog.Warn("failed to save learned geo pipeline", "request_id", msg.RequestID, "error", err)
+		} else {
+			l.context.InvalidateCache(filepath.Join(l.workspacePath, "pipelines", "geo"))
+		}
+	}
+
+	if selectedSkillName != "" && hasGeoActivity {
+		_ = skills.NewTelemetryRecorder(l.workspacePath).RecordOutcome(selectedSkillName, !hasGeoFailure)
 	}
 
 	if finalContent == "" {
 		finalContent = "Processing complete."
 	}
 
-	sess.AddMessage("user", msg.Content)
-	sess.AddMessage("assistant", finalContent)
-	l.sessions.Save(sess)
+	userMsg := sess.AddMessage("user", msg.Content)
+	asstMsg := sess.AddMessage("assistant", finalContent)
+	if err := l.sessions.Append(sess.Key, userMsg, asstMsg); err != nil {
+		slog.Warn("failed to append session messages", "error", err)
+	}
 
 	return &bus.OutboundMessage{
-		Channel: msg.Channel,
-		ChatID:  msg.ChatID,
-		Content: finalContent,
+		Channel:   msg.Channel,
+		ChatID:    msg.ChatID,
+		Content:   finalContent,
+		RequestID: msg.RequestID,
 	}, nil
 }
 
-// ProcessDirect processes a message directly (for CLI)
-func (l *Loop) ProcessDirect(ctx context.Context, content string) (string, error) {
+// ProcessForChannel 为给定的通道/会话直接处理消息。
+func (l *Loop) ProcessForChannel(ctx context.Context, channel, chatID, senderID, content string) (string, error) {
+	return l.ProcessForChannelWithSession(ctx, channel, chatID, senderID, "", content)
+}
+
+// ProcessForChannelWithSession 为通道/聊天处理消息，可选择使用显式会话 ID。
+func (l *Loop) ProcessForChannelWithSession(ctx context.Context, channel, chatID, senderID, sessionID, content string) (string, error) {
 	if err := l.bindTools(ctx); err != nil {
 		return "", err
 	}
+	if strings.TrimSpace(channel) == "" {
+		channel = "cli"
+	}
+	if strings.TrimSpace(chatID) == "" {
+		chatID = "direct"
+	}
+	if strings.TrimSpace(senderID) == "" {
+		senderID = "user"
+	}
+
 	msg := &bus.InboundMessage{
-		Channel:  "cli",
-		SenderID: "user",
-		ChatID:   "direct",
-		Content:  content,
+		Channel:   channel,
+		SenderID:  senderID,
+		ChatID:    chatID,
+		SessionID: strings.TrimSpace(sessionID),
+		Content:   content,
+		RequestID: bus.RequestIDFromContext(ctx),
+	}
+	if strings.TrimSpace(msg.RequestID) == "" {
+		msg.RequestID = bus.NewRequestID()
 	}
 
 	resp, err := l.processMessage(ctx, msg)
@@ -202,4 +647,9 @@ func (l *Loop) ProcessDirect(ctx context.Context, content string) (string, error
 		return "", err
 	}
 	return resp.Content, nil
+}
+
+// ProcessDirect 直接处理消息（用于 CLI）
+func (l *Loop) ProcessDirect(ctx context.Context, content string) (string, error) {
+	return l.ProcessForChannel(ctx, "cli", "direct", "user", content)
 }

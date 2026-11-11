@@ -31,4 +31,14 @@ func TestInitCommand_CreatesConfigAndWorkspace(t *testing.T) {
 	if _, err := os.Stat(identityPath); err != nil {
 		t.Fatalf("expected identity file at %s: %v", identityPath, err)
 	}
+
+	memoryPath := filepath.Join(cfg.WorkspacePath(), "memory", "MEMORY.md")
+	if _, err := os.Stat(memoryPath); err != nil {
+		t.Fatalf("expected memory file at %s: %v", memoryPath, err)
+	}
+
+	builtinSkillPath := filepath.Join(config.ConfigDir(), "builtin-skills", "weather", "SKILL.md")
+	if _, err := os.Stat(builtinSkillPath); err != nil {
+		t.Fatalf("expected builtin skill at %s: %v", builtinSkillPath, err)
+	}
 }

@@ -1,121 +1,138 @@
 package tools
 
 import (
-    "context"
-    "fmt"
-    "os/exec"
-    "runtime"
-    "strings"
-    "time"
+	"context"
+	"fmt"
+	"os/exec"
+	"regexp"
+	"runtime"
+	"strings"
+	"time"
 
-    "github.com/cloudwego/eino/components/tool"
-    "github.com/cloudwego/eino/components/tool/utils"
+	"github.com/cloudwego/eino/components/tool"
+	"github.com/cloudwego/eino/components/tool/utils"
 )
 
 // ExecInput parameters for exec tool
 type ExecInput struct {
-    Command    string `json:"command" jsonschema:"required,description=Shell command to execute"`
-    WorkingDir string `json:"working_dir" jsonschema:"description=Working directory for the command"`
+	Command    string `json:"command" jsonschema:"required,description=Shell command to execute"`
+	WorkingDir string `json:"working_dir" jsonschema:"description=Working directory for the command"`
 }
 
 // ExecOutput result of exec tool
 type ExecOutput struct {
-    Stdout   string `json:"stdout"`
-    Stderr   string `json:"stderr"`
-    ExitCode int    `json:"exit_code"`
+	Stdout   string `json:"stdout"`
+	Stderr   string `json:"stderr"`
+	ExitCode int    `json:"exit_code"`
 }
 
-// Dangerous commands to block
-var dangerousCommands = []string{
-    "rm -rf /",
-    "rm -rf ~",
-    "mkfs",
-    "dd if=",
-    ":(){:|:&};:",
-    "format c:",
-    "del /f /s /q",
+// dangerousPatterns 是用于匹配危险命令的正则表达式模式。
+// 这些模式在 init 时编译一次以提高效率。
+var dangerousPatterns = []*regexp.Regexp{
+	// rm with force/recursive targeting root or home
+	regexp.MustCompile(`(?i)\brm\s+(-[a-z]*r[a-z]*\s+-[a-z]*f[a-z]*|-[a-z]*f[a-z]*\s+-[a-z]*r[a-z]*|-[a-z]*rf[a-z]*|-[a-z]*fr[a-z]*)\s+/\s*$`),
+	regexp.MustCompile(`(?i)\brm\s+(-[a-z]*r[a-z]*\s+-[a-z]*f[a-z]*|-[a-z]*f[a-z]*\s+-[a-z]*r[a-z]*|-[a-z]*rf[a-z]*|-[a-z]*fr[a-z]*)\s+~`),
+	// sudo variants of rm
+	regexp.MustCompile(`(?i)\bsudo\s+rm\s+(-[a-z]*r[a-z]*\s+-[a-z]*f[a-z]*|-[a-z]*f[a-z]*\s+-[a-z]*r[a-z]*|-[a-z]*rf[a-z]*|-[a-z]*fr[a-z]*)\s+/\s*$`),
+	// explicitly disabling root safeguards
+	regexp.MustCompile(`(?i)--no-preserve-root`),
+	// filesystem format commands
+	regexp.MustCompile(`(?i)\bmkfs\b`),
+	regexp.MustCompile(`(?i)\bdd\s+if=`),
+	// fork bomb
+	regexp.MustCompile(`:\(\)\s*\{.*\|.*&\s*\}\s*;`),
+	// Windows dangerous commands
+	regexp.MustCompile(`(?i)\bformat\s+[a-z]:`),
+	regexp.MustCompile(`(?i)\bdel\s+/[a-z]\s+/[a-z]\s+/[a-z]`),
+}
+
+// isDangerous 检查命令是否匹配任何危险命令模式。
+func isDangerous(cmd string) (bool, string) {
+	for _, pat := range dangerousPatterns {
+		if pat.MatchString(cmd) {
+			return true, pat.String()
+		}
+	}
+	return false, ""
 }
 
 type execToolImpl struct {
-    timeout             time.Duration
-    restrictToWorkspace bool
-    workspaceDir        string
+	timeout             time.Duration
+	restrictToWorkspace bool
+	workspaceDir        string
 }
 
 func (e *execToolImpl) execute(ctx context.Context, input *ExecInput) (*ExecOutput, error) {
-    cmdLower := strings.ToLower(input.Command)
-    for _, dangerous := range dangerousCommands {
-        if strings.Contains(cmdLower, dangerous) {
-            return &ExecOutput{
-                Stderr:   fmt.Sprintf("Blocked dangerous command: %s", dangerous),
-                ExitCode: 1,
-            }, nil
-        }
-    }
+	if dangerous, pattern := isDangerous(input.Command); dangerous {
+		return &ExecOutput{
+			Stderr:   fmt.Sprintf("Blocked dangerous command matching pattern: %s", pattern),
+			ExitCode: 1,
+		}, nil
+	}
 
-    var workingDir string
-    if e.restrictToWorkspace && e.workspaceDir != "" {
-        if input.WorkingDir != "" {
-            safePath, err := validatePath(e.workspaceDir, input.WorkingDir)
-            if err != nil {
-                return &ExecOutput{
-                    Stderr:   fmt.Sprintf("Access denied: %v", err),
-                    ExitCode: 1,
-                }, nil
-            }
-            workingDir = safePath
-        } else {
-            workingDir = e.workspaceDir
-        }
-    } else {
-        if input.WorkingDir != "" {
-            workingDir = input.WorkingDir
-        } else if e.workspaceDir != "" {
-            workingDir = e.workspaceDir
-        }
-    }
+	// Determine working directory and enforce workspace restriction
+	workDir := input.WorkingDir
+	if e.restrictToWorkspace && e.workspaceDir != "" {
+		if workDir != "" {
+			safeDir, err := validatePath(workDir, e.workspaceDir)
+			if err != nil {
+				return &ExecOutput{
+					Stderr:   fmt.Sprintf("Working directory rejected: %s", err.Error()),
+					ExitCode: 1,
+				}, nil
+			}
+			workDir = safeDir
+		} else {
+			workDir = e.workspaceDir
+		}
+	} else if workDir == "" && e.workspaceDir != "" {
+		workDir = e.workspaceDir
+	}
 
-    timeoutCtx, cancel := context.WithTimeout(ctx, e.timeout)
-    defer cancel()
+	timeoutCtx, cancel := context.WithTimeout(ctx, e.timeout)
+	defer cancel()
 
-    var cmd *exec.Cmd
-    if runtime.GOOS == "windows" {
-        cmd = exec.CommandContext(timeoutCtx, "cmd", "/C", input.Command)
-    } else {
-        cmd = exec.CommandContext(timeoutCtx, "sh", "-c", input.Command)
-    }
-    cmd.Dir = workingDir
+	var cmd *exec.Cmd
+	if runtime.GOOS == "windows" {
+		cmd = exec.CommandContext(timeoutCtx, "cmd", "/C", input.Command)
+	} else {
+		cmd = exec.CommandContext(timeoutCtx, "sh", "-c", input.Command)
+	}
 
-    var stdout, stderr strings.Builder
-    cmd.Stdout = &stdout
-    cmd.Stderr = &stderr
+	if workDir != "" {
+		cmd.Dir = workDir
+	}
 
-    err := cmd.Run()
-    exitCode := 0
-    if err != nil {
-        if exitErr, ok := err.(*exec.ExitError); ok {
-            exitCode = exitErr.ExitCode()
-        } else {
-            return &ExecOutput{
-                Stderr:   err.Error(),
-                ExitCode: 1,
-            }, nil
-        }
-    }
+	var stdout, stderr strings.Builder
+	cmd.Stdout = &stdout
+	cmd.Stderr = &stderr
 
-    return &ExecOutput{
-        Stdout:   stdout.String(),
-        Stderr:   stderr.String(),
-        ExitCode: exitCode,
-    }, nil
+	err := cmd.Run()
+	exitCode := 0
+	if err != nil {
+		if exitErr, ok := err.(*exec.ExitError); ok {
+			exitCode = exitErr.ExitCode()
+		} else {
+			return &ExecOutput{
+				Stderr:   err.Error(),
+				ExitCode: 1,
+			}, nil
+		}
+	}
+
+	return &ExecOutput{
+		Stdout:   stdout.String(),
+		Stderr:   stderr.String(),
+		ExitCode: exitCode,
+	}, nil
 }
 
 // NewExecTool creates the exec tool
 func NewExecTool(timeoutSec int, restrictToWorkspace bool, workspaceDir string) (tool.InvokableTool, error) {
-    impl := &execToolImpl{
-        timeout:             time.Duration(timeoutSec) * time.Second,
-        restrictToWorkspace: restrictToWorkspace,
-        workspaceDir:        workspaceDir,
-    }
-    return utils.InferTool("exec", "Execute a shell command", impl.execute)
+	impl := &execToolImpl{
+		timeout:             time.Duration(timeoutSec) * time.Second,
+		restrictToWorkspace: restrictToWorkspace,
+		workspaceDir:        workspaceDir,
+	}
+	return utils.InferTool("exec", "Execute a shell command", impl.execute)
 }
