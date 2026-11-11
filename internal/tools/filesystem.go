@@ -62,7 +62,20 @@ func validatePath(workspace, target string) (string, error) {
 			return "", fmt.Errorf("failed to resolve target symlinks: %w", err)
 		}
 	} else if os.IsNotExist(err) {
-		// Doesn't exist, resolve parent
+		// os.Stat follows symlinks, so a dangling symlink looks like a missing
+		// file. Canonicalizing only the parent of the link path would accept
+		// it: that parent is inside the workspace, but os.WriteFile follows
+		// the link and creates the (possibly outside) target. Lstat does not
+		// follow the final component, so reject the link before that fallback.
+		// This matches the broken-symlink check from PR #24; parent
+		// canonicalization below is the PR #32 behavior for a path that
+		// really does not exist yet.
+		if info, lstatErr := os.Lstat(absTarget); lstatErr == nil && info.Mode()&os.ModeSymlink != 0 {
+			return "", fmt.Errorf("access denied: path %q is a broken symlink", target)
+		}
+
+		// Missing file: resolve the parent so a new path cannot be created
+		// through a parent symlink that points outside the workspace.
 		parent := filepath.Dir(absTarget)
 		canonicalParent, err := filepath.EvalSymlinks(parent)
 		if err != nil {
@@ -139,7 +152,7 @@ func NewReadFileTool(workspacePath string) (tool.InvokableTool, error) {
 							}
 
 							// If this is the (Offset + Limit)-th newline, stop reading (endOffset).
-							if input.Limit > 0 && currentNewlineCount == (input.Offset + input.Limit) {
+							if input.Limit > 0 && currentNewlineCount == (input.Offset+input.Limit) {
 								endOffset = currentPos + int64(i)
 							}
 						}
